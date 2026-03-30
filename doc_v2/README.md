@@ -1,4 +1,4 @@
-﻿# WebRTC v2 Docs
+# WebRTC v2 Docs
 
 ## Purpose
 
@@ -28,8 +28,14 @@ As of the current codebase, the following flow works in `game.unity`:
 - chat over `RTCDataChannel`
 - hangup
 - recovery through ICE restart after short disruptions
-- best-effort Android local notifications for `PeerJoined` and `Connected`
 - fatal startup/runtime error screen for managed failures
+
+Important caveat:
+
+- the media/signaling baseline is considered working
+- the current semi-automatic lobby/waiting-room logic is not considered product-stable
+- after terminal call return, both peers can still end up recreating separate waiting rooms and remain stuck in parallel waiting state
+- treat the current lobby implementation as a temporary baseline that is scheduled for redesign
 
 The baseline transport assumptions are:
 
@@ -58,15 +64,15 @@ The baseline transport assumptions are:
 - push-to-talk voice UX
 - TURN integration with Metered static credentials
 - relay/direct diagnostics through selected ICE route logging
-- best-effort Android local notifications via `Mobile Notifications`
 - crash-reporting pipeline with local persistence and runtime fatal overlay
 
 ## What Is Not Finished Yet
 
 - polished multi-device GUI/UX
-- relay-aware media policy such as auto-disable video on relay path
+- stable lobby/pairing UX; current semi-automatic lobby remains a known weak spot`n- relay-aware media policy such as auto-disable video on relay path
 - manual signaling mode in the new stack
-- WebSocket signaling
+- WebSocket control channel for room events
+- finalized best-effort Android local notifications after WebSocket control migration
 - remote crash-report upload or email delivery
 - native/IL2CPP crash capture beyond managed exception guards
 
@@ -115,10 +121,10 @@ Lifecycle is tracked separately from media and route.
 ## Next Priorities
 
 1. Polish lobby and call-screen UX across devices.
-2. Decide whether relay path should force audio + chat only.
-3. Improve crash-screen wording and error-code readability for field testing.
-4. Finish TURN operational guidance and test on harder NAT paths.
-5. Revisit video and larger room models only after the 1:1 baseline stays stable.
+2. Migrate room/control fast-path from polling to a Durable Object WebSocket channel.
+3. Finalize best-effort Android local notifications after the WebSocket control channel lands.
+4. Decide whether relay path should force audio + chat only.
+5. Improve crash-screen wording and error-code readability for field testing.
 
 ## Voice UX Note
 

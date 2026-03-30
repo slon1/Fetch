@@ -40,6 +40,7 @@ namespace WebRtcV2.Application.Connection {
         private readonly ISecretsProvider _secrets;
         private readonly ConnectionDiagnostics _diagnostics;
         private readonly MediaCaptureService _mediaCapture;
+        private readonly RoomControlSocketService _roomControlSocket;
         private readonly ConnectionStateMachine _fsm;
         private readonly QualityMonitor _qualityMonitor;
         private readonly string _localPeerId;
@@ -52,6 +53,8 @@ namespace WebRtcV2.Application.Connection {
         private RTCDataChannel _dataChannel;
         private string _activeSessionId;
         private bool _hangupPollingStarted;
+        private bool _relayFallbackQueued;
+        private bool _currentAttemptUsesRelay;
 
         private CancellationTokenSource _sessionCts;
 
@@ -92,12 +95,14 @@ namespace WebRtcV2.Application.Connection {
             ISecretsProvider secrets,
             ConnectionDiagnostics diagnostics,
             MediaCaptureService mediaCapture,
+            RoomControlSocketService roomControlSocket,
             string localPeerId) {
             _worker = worker;
             _config = config;
             _secrets = secrets;
             _diagnostics = diagnostics;
             _mediaCapture = mediaCapture;
+            _roomControlSocket = roomControlSocket;
             _localPeerId = localPeerId;
 
             _fsm = new ConnectionStateMachine(diagnostics);
@@ -105,6 +110,7 @@ namespace WebRtcV2.Application.Connection {
 
             _qualityMonitor = new QualityMonitor();
             _qualityMonitor.OnSignalChanged += HandleQualitySignal;
+            _roomControlSocket.OnEvent += HandleRoomControlEvent;
 
             _policy = new ConnectionPolicy(config, diagnostics);
             _recovery = new RecoveryCoordinator(config, diagnostics);
@@ -113,10 +119,11 @@ namespace WebRtcV2.Application.Connection {
         // РІвЂќР‚РІвЂќР‚ Connect flows РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         public async UniTask ConnectAsCallerAsync(string sessionId, CancellationToken ct = default) {
+            bool useRelayThisAttempt = ConsumeRelayPreferenceForNewAttempt();
             _fsm.Reset();
             _session.Initialize(sessionId, isCreator: true,
                 mediaMode: MediaMode.AudioOnly,
-                routeMode: RouteMode.Direct,
+                routeMode: useRelayThisAttempt ? RouteMode.Relay : RouteMode.Direct,
                 signalingMode: SignalingMode.WorkerPolling);
             _activeSessionId = sessionId;
             _hangupPollingStarted = false;
@@ -136,7 +143,7 @@ namespace WebRtcV2.Application.Connection {
 
                 // Step 2: wait for all ICE candidates РІР‚вЂќ non-trickle ICE (MVP).
                 await _peer.WaitForIceGatheringAsync(
-                    _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, _config.ice.relayOnly);
+                    _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, GetEffectiveRelayOnly());
 
                 // Step 3: LocalSdp is valid only after gathering completes.
                 string localSdp = _peer.LocalSdp;
@@ -179,6 +186,7 @@ namespace WebRtcV2.Application.Connection {
             catch (Exception e) {
                 _session.SetLastError(e.Message);
                 _diagnostics.LogError("ConnectionFlow", e.Message);
+                QueueRelayFallbackIfNeeded(e.Message);
                 SetLifecycle(ConnectionLifecycleState.Failed, e.Message);
                 CleanupSession();
             }
@@ -190,10 +198,11 @@ namespace WebRtcV2.Application.Connection {
         /// </param>
         public async UniTask ConnectAsCalleeAsync(
             string sessionId, string callerPeerId, CancellationToken ct = default) {
+            bool useRelayThisAttempt = ConsumeRelayPreferenceForNewAttempt();
             _fsm.Reset();
             _session.Initialize(sessionId, isCreator: false,
                 mediaMode: MediaMode.AudioOnly,
-                routeMode: RouteMode.Direct,
+                routeMode: useRelayThisAttempt ? RouteMode.Relay : RouteMode.Direct,
                 signalingMode: SignalingMode.WorkerPolling);
             _activeSessionId = sessionId;
             _hangupPollingStarted = false;
@@ -236,7 +245,7 @@ namespace WebRtcV2.Application.Connection {
 
                 // Step 2: wait for all ICE candidates РІР‚вЂќ non-trickle ICE (MVP).
                 await _peer.WaitForIceGatheringAsync(
-                    _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, _config.ice.relayOnly);
+                    _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, GetEffectiveRelayOnly());
 
                 // Step 3: LocalSdp is valid only after gathering completes.
                 string localSdp = _peer.LocalSdp;
@@ -264,6 +273,7 @@ namespace WebRtcV2.Application.Connection {
             catch (Exception e) {
                 _session.SetLastError(e.Message);
                 _diagnostics.LogError("ConnectionFlow", e.Message);
+                QueueRelayFallbackIfNeeded(e.Message);
                 SetLifecycle(ConnectionLifecycleState.Failed, e.Message);
                 CleanupSession();
             }
@@ -343,6 +353,7 @@ namespace WebRtcV2.Application.Connection {
         /// ConnectAsCalleeAsync try/catch).
         /// </summary>
         private void FailSession(string reason) {
+            QueueRelayFallbackIfNeeded(reason);
             SetLifecycle(ConnectionLifecycleState.Failed, reason);
             CleanupSession();
         }
@@ -412,7 +423,7 @@ namespace WebRtcV2.Application.Connection {
             return new RTCConfiguration
             {
                 iceServers = servers.ToArray(),
-                iceTransportPolicy = _config.ice.relayOnly
+                iceTransportPolicy = GetEffectiveRelayOnly()
                     ? RTCIceTransportPolicy.Relay
                     : RTCIceTransportPolicy.All
             };
@@ -527,6 +538,7 @@ namespace WebRtcV2.Application.Connection {
         }
 
         private void HandleQualitySnapshot(QualitySnapshot quality) {
+            UpdateRouteModeFromQualitySnapshot(quality);
             var decision = _policy.Evaluate(_session.ToSnapshot(), quality);
 
             if (decision == ConnectionPolicyDecision.DowngradeToDataOnly) {
@@ -554,6 +566,59 @@ namespace WebRtcV2.Application.Connection {
         ///
         /// Upgrade back to AudioOnly is not implemented in this release.
         /// </summary>
+        private void UpdateRouteModeFromQualitySnapshot(QualitySnapshot quality) {
+            if (quality == null || string.IsNullOrWhiteSpace(quality.SelectedRouteSummary))
+                return;
+
+            var routeMode = quality.SelectedRouteSummary.IndexOf("relay", StringComparison.OrdinalIgnoreCase) >= 0
+                ? RouteMode.Relay
+                : RouteMode.Direct;
+
+            if (_session.RouteMode == routeMode)
+                return;
+
+            _session.SetRouteMode(routeMode);
+            RaiseSnapshotChanged();
+        }
+
+        private void HandleRoomControlEvent(RoomControlEvent controlEvent) {
+            if (controlEvent == null ||
+                string.IsNullOrWhiteSpace(_activeSessionId) ||
+                !string.Equals(controlEvent.sessionId, _activeSessionId, StringComparison.Ordinal))
+                return;
+
+            if (!string.Equals(controlEvent.type, RoomControlEvent.Types.SignalAvailable, StringComparison.Ordinal))
+                return;
+
+            if (!string.Equals(controlEvent.signalType, SignalingEnvelope.Types.Hangup, StringComparison.Ordinal))
+                return;
+
+            HandleRemoteHangupSignalAsync().Forget();
+        }
+
+        private async UniTaskVoid HandleRemoteHangupSignalAsync() {
+            if (_fsm.IsTerminal || string.IsNullOrWhiteSpace(_activeSessionId))
+                return;
+
+            string sessionId = _activeSessionId;
+            var sessionToken = _sessionCts?.Token ?? CancellationToken.None;
+
+            try {
+                var hangup = await _worker.GetSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, sessionToken);
+                if (hangup == null || _fsm.IsTerminal || !string.Equals(sessionId, _activeSessionId, StringComparison.Ordinal))
+                    return;
+
+                _diagnostics.LogSignaling("IN", SignalingEnvelope.Types.Hangup, "remote-socket");
+                await _worker.DeleteSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, CancellationToken.None)
+                    .SuppressCancellationThrow();
+
+                SetLifecycle(ConnectionLifecycleState.Closed, "remote-hangup");
+                CleanupSession();
+            }
+            catch (OperationCanceledException) {
+            }
+        }
+
         private void ApplyDataOnlyMode() {
             _mediaCapture.DisableAudioTrack();
             _session.SetMediaMode(MediaMode.DataOnly);
@@ -663,7 +728,7 @@ namespace WebRtcV2.Application.Connection {
 
                 await _peer.CreateOfferAsync(true, sessionToken);
                 await _peer.WaitForIceGatheringAsync(
-                    _config.connection.iceGatheringTimeoutMs, sessionToken, _config.ice.relayOnly);
+                    _config.connection.iceGatheringTimeoutMs, sessionToken, GetEffectiveRelayOnly());
 
                 string localSdp = _peer.LocalSdp;
                 if (string.IsNullOrEmpty(localSdp))
@@ -700,6 +765,7 @@ namespace WebRtcV2.Application.Connection {
             catch (Exception e) {
                 _iceRestartInProgress = false;
                 _diagnostics.LogError("Recovery", $"ICE restart (caller) failed: {e.Message}");
+                QueueRelayFallbackIfNeeded(e.Message);
                 if (!_fsm.IsTerminal)
                     HandleIceFailedAsync().Forget();
                 return;
@@ -728,6 +794,7 @@ namespace WebRtcV2.Application.Connection {
             catch (Exception e) {
                 _iceRestartInProgress = false;
                 _diagnostics.LogError("Recovery", $"ICE restart (callee) failed: {e.Message}");
+                QueueRelayFallbackIfNeeded(e.Message);
                 if (!_fsm.IsTerminal)
                     HandleIceFailedAsync().Forget();
                 return;
@@ -750,6 +817,7 @@ namespace WebRtcV2.Application.Connection {
             catch (Exception e) {
                 _iceRestartInProgress = false;
                 _diagnostics.LogError("Recovery", $"Incoming ICE restart failed: {e.Message}");
+                QueueRelayFallbackIfNeeded(e.Message);
                 if (!_fsm.IsTerminal)
                     HandleIceFailedAsync().Forget();
                 return;
@@ -766,7 +834,7 @@ namespace WebRtcV2.Application.Connection {
             var offerSdp = JsonUtility.FromJson<SdpPayload>(offerEnvelope.payloadJson);
             await _peer.SetRemoteDescriptionAsync(offerSdp.sdp, RTCSdpType.Offer, ct);
             await _peer.CreateAnswerAsync(ct);
-            await _peer.WaitForIceGatheringAsync(_config.connection.iceGatheringTimeoutMs, ct, _config.ice.relayOnly);
+            await _peer.WaitForIceGatheringAsync(_config.connection.iceGatheringTimeoutMs, ct, GetEffectiveRelayOnly());
 
             string localSdp = _peer.LocalSdp;
             if (string.IsNullOrEmpty(localSdp))
@@ -829,6 +897,49 @@ namespace WebRtcV2.Application.Connection {
                 FailSession("ice-connect-timeout");
         }
 
+        private bool ConsumeRelayPreferenceForNewAttempt() {
+            if (_config.ice.relayOnly) {
+                _currentAttemptUsesRelay = true;
+                return true;
+            }
+
+            _currentAttemptUsesRelay = _relayFallbackQueued;
+            _relayFallbackQueued = false;
+            return _currentAttemptUsesRelay;
+        }
+
+        private bool GetEffectiveRelayOnly() => _config.ice.relayOnly || _currentAttemptUsesRelay;
+
+        private void QueueRelayFallbackIfNeeded(string reason) {
+            if (!_config.connection.enableRelayFallback ||
+                _config.ice.relayOnly ||
+                _currentAttemptUsesRelay ||
+                _relayFallbackQueued ||
+                !ShouldQueueRelayFallback(reason))
+                return;
+
+            _relayFallbackQueued = true;
+            _diagnostics.LogInfo("Recovery", $"Queued relay fallback due to {reason}");
+        }
+
+        private static bool ShouldQueueRelayFallback(string reason) {
+            if (string.IsNullOrWhiteSpace(reason))
+                return false;
+
+            switch (reason) {
+                case "answer-timeout":
+                case "offer-not-found":
+                case "ice-connect-timeout":
+                case "max-reconnect-reached":
+                case "ice-restart-timeout":
+                case "ice-restart-answer-timeout":
+                case "ice-restart-offer-timeout":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         private void CleanupSignalingSlotsBestEffort(string sessionId, params string[] types) {
             if (string.IsNullOrEmpty(sessionId)) return;
             DeleteSignalingSlotsAsync(sessionId, types).Forget();
@@ -881,6 +992,7 @@ namespace WebRtcV2.Application.Connection {
             _peer = null;
             _qualityMonitor.Reset();
             _hangupPollingStarted = false;
+            _currentAttemptUsesRelay = false;
 
             // Best-effort cleanup of SDP slots. Hangup is intentionally excluded:
             // - local hangup: the slot must remain readable for the remote peer (TTL=15s).
@@ -894,6 +1006,7 @@ namespace WebRtcV2.Application.Connection {
         }
 
         public void Dispose() {
+            _roomControlSocket.OnEvent -= HandleRoomControlEvent;
             CleanupSession();
             _recovery.Dispose();
             _sessionCts?.Dispose();
@@ -901,20 +1014,3 @@ namespace WebRtcV2.Application.Connection {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -42,6 +42,10 @@ export default {
       if (joinMatch && method === "POST")
         return withCors(await handleJoinRoom(joinMatch[1], env));
 
+      const eventsMatch = path.match(/^\/api\/rooms\/([^/]+)\/events$/);
+      if (eventsMatch && method === "GET")
+        return handleRoomEvents(eventsMatch[1], request, env);
+
       const roomMatch = path.match(/^\/api\/rooms\/([^/]+)$/);
       if (roomMatch) {
         if (method === "GET") return withCors(await handleGetRoom(roomMatch[1], env));
@@ -67,6 +71,7 @@ export default {
 export class RoomDurableObject {
   constructor(state) {
     this.state = state;
+    this.webSockets = new Set();
   }
 
   async fetch(request) {
@@ -81,6 +86,9 @@ export class RoomDurableObject {
 
     if (path === "/internal/room" && method === "GET")
       return this.handleGetRoom();
+
+    if (path === "/internal/events" && method === "GET")
+      return this.handleEvents(request);
 
     if (path === "/internal/heartbeat" && method === "POST")
       return this.handleHeartbeat(request);
@@ -100,6 +108,14 @@ export class RoomDurableObject {
     return respondJson({ error: "Not Found" }, 404);
   }
 
+  webSocketClose(socket) {
+    this.webSockets.delete(socket);
+  }
+
+  webSocketError(socket) {
+    this.webSockets.delete(socket);
+  }
+
   async alarm() {
     const room = await this.getRoom();
     if (!room) {
@@ -113,11 +129,67 @@ export class RoomDurableObject {
       room.status === "waiting" && !isRoomWaitingAlive(room, now);
 
     if (maxAgeExceeded || roomExpiredAndUnused || room.status === "closed") {
+      await this.broadcastControlEvent({
+        type: "room_closed",
+        sessionId: room.sessionId,
+        roomStatus: "closed",
+        signalType: null,
+      });
       await this.clearAll();
       return;
     }
 
     await this.scheduleAlarm(room, now);
+  }
+
+  async handleEvents(request) {
+    const upgrade = request.headers.get("Upgrade");
+    if (!upgrade || upgrade.toLowerCase() !== "websocket")
+      return new Response("Expected websocket", { status: 426 });
+
+    const [client, server] = Object.values(new WebSocketPair());
+
+    if (typeof this.state.acceptWebSocket === "function") {
+      this.state.acceptWebSocket(server);
+    } else {
+      server.accept();
+      this.webSockets.add(server);
+      server.addEventListener("close", () => this.webSockets.delete(server));
+      server.addEventListener("error", () => this.webSockets.delete(server));
+    }
+
+    const room = await this.getRoom();
+    server.send(JSON.stringify({
+      type: "room_state",
+      sessionId: room?.sessionId || null,
+      roomStatus: room?.status || "closed",
+      signalType: null,
+    }));
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  getConnectedSockets() {
+    if (typeof this.state.getWebSockets === "function")
+      return this.state.getWebSockets();
+
+    return Array.from(this.webSockets);
+  }
+
+  async broadcastControlEvent(payload) {
+    const message = JSON.stringify(payload);
+    const sockets = this.getConnectedSockets();
+    await Promise.allSettled(sockets.map(async (socket) => {
+      try {
+        socket.send(message);
+      } catch {
+        this.webSockets.delete(socket);
+        try {
+          socket.close(1011, "broadcast-failed");
+        } catch {
+        }
+      }
+    }));
   }
 
   async handleInit(request) {
@@ -232,6 +304,12 @@ export class RoomDurableObject {
     room.joinedAt = now;
     await this.state.storage.put("room", room);
     await this.scheduleAlarm(room, now);
+    await this.broadcastControlEvent({
+      type: "peer_joined",
+      sessionId: room.sessionId,
+      roomStatus: room.status,
+      signalType: null,
+    });
 
     return respondJson({
       ok: true,
@@ -241,6 +319,16 @@ export class RoomDurableObject {
   }
 
   async handleDelete() {
+    const room = await this.getRoom();
+    if (room) {
+      await this.broadcastControlEvent({
+        type: "room_closed",
+        sessionId: room.sessionId,
+        roomStatus: "closed",
+        signalType: null,
+      });
+    }
+
     await this.clearAll();
     return respondJson({ ok: true });
   }
@@ -275,6 +363,12 @@ export class RoomDurableObject {
 
     await this.state.storage.put(this.signalKey(type), normalizedEnvelope);
     await this.scheduleAlarm(room, Date.now());
+    await this.broadcastControlEvent({
+      type: "signal_available",
+      sessionId: room.sessionId,
+      roomStatus: room.status,
+      signalType: type,
+    });
     return respondJson({ ok: true });
   }
 
@@ -503,6 +597,15 @@ async function handleCreateRoom(request, env) {
 async function handleGetRoom(sessionId, env) {
   if (!sessionId) return respondJson({ error: "sessionId required" }, 400);
   return roomStub(env, sessionId).fetch("https://room/internal/room", { method: "GET" });
+}
+
+async function handleRoomEvents(sessionId, request, env) {
+  if (!sessionId) return respondJson({ error: "sessionId required" }, 400);
+
+  const originalUrl = new URL(request.url);
+  const internalUrl = new URL("https://room/internal/events");
+  internalUrl.search = originalUrl.search;
+  return roomStub(env, sessionId).fetch(new Request(internalUrl.toString(), request));
 }
 
 async function handleHeartbeatRoom(sessionId, request, env) {

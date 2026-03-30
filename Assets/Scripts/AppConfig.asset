@@ -19,6 +19,7 @@ MonoBehaviour:
     roomTtlSec: 180
     roomHeartbeatIntervalSec: 20
     roomHeartbeatTimeoutSec: 30
+    roomControlSocketReconnectDelaySec: 2
   ice:
     relayOnly: 0
     stunUrls:
@@ -34,6 +35,7 @@ MonoBehaviour:
     iceRestartTimeoutMs: 8000
     initialIceConnectTimeoutMs: 20000
     signalingPollTimeoutMs: 30000
+    enableRelayFallback: 1
   policy:
     statsPollingIntervalMs: 1000
     degradeRttThresholdMs: 400

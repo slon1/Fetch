@@ -1,4 +1,4 @@
-﻿# Implementation Plan
+# Implementation Plan
 
 ## Status Summary
 
@@ -7,6 +7,13 @@ This file tracks the actual project path, not an aspirational rewrite.
 The codebase already has a working vertical slice in `game.unity`, so the next
 iterations should build on that reality instead of restarting architecture from
 scratch.
+
+Current branch posture:
+
+- media, signaling, recovery and crash-guard baseline are considered working enough to archive as a milestone
+- the current semi-automatic lobby is explicitly not the final product model
+- known lobby failure mode: after a call ends, both peers can recreate separate waiting rooms and remain stuck in parallel waiting state
+- next iteration is expected to redesign pairing/lobby UX rather than continue stacking fixes onto the current room-first flow
 
 ## Completed Stages
 
@@ -106,7 +113,6 @@ Delivered:
 - join-first flow when foreign rooms exist
 - waiting-room heartbeat through `RoomHeartbeatService`
 - return to lobby after terminal session states using the same bootstrap logic
-- best-effort Android local notifications for `PeerJoined` and `Connected`
 
 ### Stage 7. Crash Guard and Fatal Error Screen
 
@@ -127,20 +133,26 @@ Current limitation:
 
 ## Active Short-Term Work
 
-### Stage 8. Lobby and Call UX Polish
+### Stage 8. WebSocket Control Channel and Reduced Heartbeat Role
 
-Status: next
+Status: partially landed, not accepted as product baseline
 
 Goals:
 
-- cleaner lobby messaging for waiting, joining and retry states
-- clearer terminal-call feedback after remote hangup and failed recovery
-- more consistent layout across phones with different aspect ratios
+- move low-latency room/control events from polling to a Durable Object WebSocket channel
+- keep heartbeat only as a coarse waiting-room lease / cleanup mechanism
+- remove fast-path dependence on room polling for `peer_joined` and control wakeups
 
 Acceptance:
 
-- users understand whether they are waiting, joining, connected, recovering or closed
-- common device layouts do not hide critical controls or text
+- waiting-room owner is notified about `peer_joined` without room polling delay
+- remote hangup and room-close events no longer depend on polling cadence
+- heartbeat interval can be relaxed because it is no longer on the fast path
+
+Current caveat before redesign:
+
+- first WebSocket/control pieces may exist in the branch, but the surrounding semi-automatic lobby behavior is still considered unstable
+- Stage 8 should not be treated as complete until the next pairing/lobby UX redesign lands
 
 ### Stage 9. TURN Operational Hardening
 
@@ -169,6 +181,7 @@ Current progress:
 
 Remaining work:
 
+- add automatic relay fallback for the next connection attempt after direct/recovery failure
 - decide final relay media policy
 - document operator playbook for TURN credentials and quota monitoring
 - optionally add clearer user-facing relay/direct indicator later
@@ -197,14 +210,14 @@ Reason:
 
 - current lobby, crash guard and TURN work are more valuable first
 
-### Stage 12. WebSocket Signaling
+### Stage 12. Android Local Notifications Finalization
 
-Status: optional / deferred
+Status: deferred until Stage 8 lands
 
 Reason:
 
-- HTTP polling is already functional
-- WebSocket is an optimization, not a prerequisite for the current 1:1 baseline
+- `Connected` can be notified locally today, but `PeerJoined` should use the future WebSocket control channel instead of polling/heartbeat
+- final best-effort notifications should be wired after the room/control socket exists
 
 ### Stage 13. Larger Room Models / SFU Path
 
@@ -220,3 +233,4 @@ Reason:
 - keep crash diagnostics local-first unless there is a strong reason to add backend upload
 - prefer incremental DO-backed improvements over rewrites of the entire signaling path
 - do not let GUI refactors blur room, signaling and connection responsibilities
+- if useful, limited Sonnet budget can be used via the user for scoped code writing, review or refactoring; do not assume direct connector access

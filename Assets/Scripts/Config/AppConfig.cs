@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 
 namespace WebRtcV2.Config
 {
@@ -31,6 +31,9 @@ namespace WebRtcV2.Config
 
             [Tooltip("How long a waiting room stays visible without heartbeat, seconds")]
             public int roomHeartbeatTimeoutSec = 30;
+
+            [Tooltip("Reconnect delay for the room control WebSocket, seconds")]
+            public float roomControlSocketReconnectDelaySec = 2f;
         }
 
         [System.Serializable]
@@ -77,6 +80,9 @@ namespace WebRtcV2.Config
 
             [Tooltip("Total timeout for waiting a signaling response (offer/answer), milliseconds")]
             public int signalingPollTimeoutMs = 30000;
+
+            [Tooltip("If enabled, the next connection attempt after a direct-path failure uses relayOnly")]
+            public bool enableRelayFallback = true;
         }
 
         [System.Serializable]

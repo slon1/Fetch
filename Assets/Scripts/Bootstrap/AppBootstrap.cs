@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using Unity.WebRTC;
 using UnityEngine;
@@ -38,6 +38,7 @@ namespace WebRtcV2.Bootstrap
         private MediaCaptureService _mediaCapture;
         private IRoomFlow _roomFlow;
         private RoomHeartbeatService _heartbeatService;
+        private RoomControlSocketService _roomControlSocketService;
         private IConnectionFlow _connectionFlow;
         private AppUiCoordinator _uiCoordinator;
         private AppVisibilityTracker _visibilityTracker;
@@ -103,6 +104,8 @@ namespace WebRtcV2.Bootstrap
 
         private void Update()
         {
+            _roomControlSocketService?.DispatchMessageQueue();
+
             if (_crashCoordinator != null && _crashCoordinator.TryConsumePendingFatal(out CrashReportModel report))
                 EnterFatalState(report);
         }
@@ -144,6 +147,7 @@ namespace WebRtcV2.Bootstrap
                 identity.DisplayName);
 
             _heartbeatService = new RoomHeartbeatService(_roomFlow, config, _diagnostics);
+            _roomControlSocketService = new RoomControlSocketService(config, _diagnostics);
 
             _connectionFlow = new ConnectionFlowCoordinator(
                 _workerClient,
@@ -151,6 +155,7 @@ namespace WebRtcV2.Bootstrap
                 _secretsProvider,
                 _diagnostics,
                 _mediaCapture,
+                _roomControlSocketService,
                 identity.ClientId);
         }
 
@@ -166,6 +171,7 @@ namespace WebRtcV2.Bootstrap
                 _roomFlow,
                 _connectionFlow,
                 _heartbeatService,
+                _roomControlSocketService,
                 _notificationService,
                 _appCts.Token);
         }
@@ -188,6 +194,7 @@ namespace WebRtcV2.Bootstrap
             SafeRun(() => _uiCoordinator?.Dispose());
             SafeRun(() => (_connectionFlow as IDisposable)?.Dispose());
             SafeRun(() => _heartbeatService?.Dispose());
+            SafeRun(() => _roomControlSocketService?.Dispose());
             SafeRun(() => _notificationService?.Dispose());
             SafeRun(() => _mediaCapture?.Dispose());
             SafeRun(() => _appCts?.Dispose());
@@ -195,6 +202,7 @@ namespace WebRtcV2.Bootstrap
             _uiCoordinator = null;
             _connectionFlow = null;
             _heartbeatService = null;
+            _roomControlSocketService = null;
             _notificationService = null;
             _mediaCapture = null;
             _appCts = null;

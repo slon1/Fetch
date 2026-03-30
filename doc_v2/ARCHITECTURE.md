@@ -1,4 +1,4 @@
-﻿# Architecture
+# Architecture
 
 ## Product Direction
 
@@ -87,16 +87,18 @@ Responsibilities:
 - list rooms
 - create own waiting room
 - join foreign room
-- poll owned room state until peer join
+- observe waiting-room join through transitional polling/socket logic in the current branch
 - delete stale or terminal rooms
+- carry a known limitation: the current semi-automatic lobby can still produce parallel waiting rooms after both peers return from a call
 
 `RoomHeartbeatService`
 
 Responsibilities:
 
-- keep waiting-room ownership alive with periodic heartbeat
+- keep waiting-room ownership alive with periodic heartbeat lease
 - stop/start with lobby lifecycle
-- stay independent from WebRTC degradation logic
+- stay independent from WebRTC degradation logic and fast room events
+- remain a coarse cleanup/presence mechanism even after WebSocket control migration
 
 #### Connection
 
@@ -206,7 +208,7 @@ Current behavior:
 Current signaling strategy is intentionally simple.
 
 - Cloudflare Worker + Durable Objects
-- HTTP polling
+- HTTP polling today; WebSocket control channel planned next for low-latency room events
 - non-trickle ICE
 - one signaling slot per `(sessionId, type)`
 - room state and lobby membership coordinated by Durable Objects, not KV
@@ -225,8 +227,10 @@ Lobby behavior:
 - own waiting room is hidden from own lobby list
 - if no foreign rooms are available, client creates its own waiting room
 - WebRTC starts only after an actual room join
-- waiting-room heartbeat is used for presence/freshness
+- waiting-room heartbeat is used for coarse presence/freshness lease only
+- low-latency events such as `peer_joined` are planned to move to a DO WebSocket control channel
 - joined rooms disappear from lobby immediately, but room state lives until call terminal state
+- known limitation: when both peers re-enter lobby at the same time, the current room-first UX can still create two waiting rooms and leave both sides waiting; this behavior is considered temporary and will be redesigned
 
 ## Control Plane Split
 
@@ -239,7 +243,8 @@ Through Durable Objects:
 - `hangup`
 - ICE restart signaling
 - waiting-room state
-- room heartbeat / presence
+- room heartbeat / coarse presence lease
+- future room/control WebSocket events (`peer_joined`, `remote_hangup`, `room_closed`)
 
 Through `RTCDataChannel`:
 
@@ -257,6 +262,10 @@ Current ICE configuration is built from two sources:
 - TURN credentials and TURN URLs from `StreamingAssets/dev-secrets.json`
 
 Current Metered integration uses static dashboard credentials for development.
+
+Planned next step:
+
+- automatic relay fallback on the next connection attempt after direct/recovery failure
 
 Runtime behavior:
 

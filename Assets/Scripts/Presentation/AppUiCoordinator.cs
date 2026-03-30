@@ -22,6 +22,7 @@ namespace WebRtcV2.Presentation
         private readonly AppConfig _config;
         private readonly CancellationToken _appToken;
         private readonly AndroidLocalNotificationService _notificationService;
+        private readonly RoomControlSocketService _roomControlSocket;
         private readonly LobbyUiController _lobbyController;
         private readonly CallUiController _callController;
 
@@ -39,6 +40,7 @@ namespace WebRtcV2.Presentation
             IRoomFlow roomFlow,
             IConnectionFlow connectionFlow,
             RoomHeartbeatService heartbeatService,
+            RoomControlSocketService roomControlSocket,
             AndroidLocalNotificationService notificationService,
             CancellationToken appToken)
         {
@@ -46,6 +48,7 @@ namespace WebRtcV2.Presentation
             _roomFlow = roomFlow;
             _connectionFlow = connectionFlow;
             _config = config;
+            _roomControlSocket = roomControlSocket;
             _notificationService = notificationService;
             _appToken = appToken;
 
@@ -55,6 +58,7 @@ namespace WebRtcV2.Presentation
                 roomFlow,
                 connectionFlow,
                 heartbeatService,
+                roomControlSocket,
                 notificationService,
                 config,
                 appToken,
@@ -114,6 +118,7 @@ namespace WebRtcV2.Presentation
             try
             {
                 _notificationService.CancelSessionNotification(snapshot.SessionId);
+                _roomControlSocket?.Disconnect();
                 _callController.ClearTransientMedia();
                 ShowLobby();
 

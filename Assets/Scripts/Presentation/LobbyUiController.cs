@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using WebRtcV2.Application.Connection;
 using WebRtcV2.Application.Room;
 using WebRtcV2.Config;
 using WebRtcV2.Shared;
+using WebRtcV2.Transport;
 
 namespace WebRtcV2.Presentation
 {
@@ -19,6 +20,7 @@ namespace WebRtcV2.Presentation
         private readonly IRoomFlow _roomFlow;
         private readonly IConnectionFlow _connectionFlow;
         private readonly RoomHeartbeatService _heartbeatService;
+        private readonly RoomControlSocketService _roomControlSocket;
         private readonly AndroidLocalNotificationService _notificationService;
         private readonly AppConfig _config;
         private readonly CancellationToken _appToken;
@@ -38,6 +40,7 @@ namespace WebRtcV2.Presentation
             IRoomFlow roomFlow,
             IConnectionFlow connectionFlow,
             RoomHeartbeatService heartbeatService,
+            RoomControlSocketService roomControlSocket,
             AndroidLocalNotificationService notificationService,
             AppConfig config,
             CancellationToken appToken,
@@ -48,6 +51,7 @@ namespace WebRtcV2.Presentation
             _roomFlow = roomFlow;
             _connectionFlow = connectionFlow;
             _heartbeatService = heartbeatService;
+            _roomControlSocket = roomControlSocket;
             _notificationService = notificationService;
             _config = config;
             _appToken = appToken;
@@ -56,6 +60,7 @@ namespace WebRtcV2.Presentation
             _lobbyView.OnCreateRoom += HandleCreateRoom;
             _lobbyView.OnRefreshRooms += HandleRefreshRoomsClicked;
             _lobbyView.OnRoomSelected += HandleRoomSelected;
+            _roomControlSocket.OnEvent += HandleRoomControlEvent;
         }
 
         public void Dispose()
@@ -63,17 +68,18 @@ namespace WebRtcV2.Presentation
             if (_disposed) return;
             _disposed = true;
 
-            StopLobbyLoops();
+            StopLobbyLoops(disconnectSocket: true);
             _lobbyView.OnCreateRoom -= HandleCreateRoom;
             _lobbyView.OnRefreshRooms -= HandleRefreshRoomsClicked;
             _lobbyView.OnRoomSelected -= HandleRoomSelected;
+            _roomControlSocket.OnEvent -= HandleRoomControlEvent;
         }
 
         public void Show() => _lobbyView.Show();
 
         public void Hide()
         {
-            StopLobbyLoops();
+            StopLobbyLoops(disconnectSocket: false);
             _lobbyView.Hide();
         }
 
@@ -145,7 +151,7 @@ namespace WebRtcV2.Presentation
         {
             if (_disposed) return;
 
-            StopLobbyLoops();
+            StopLobbyLoops(disconnectSocket: true);
             _isTransitioning = true;
             _statusView.ClearError();
             _lobbyView.ShowLoadingState("Загрузка комнат...");
@@ -168,6 +174,7 @@ namespace WebRtcV2.Presentation
                     throw new InvalidOperationException("owned waiting room was not created");
 
                 _lobbyView.ShowWaitingRoom(_ownedWaitingRoom);
+                _roomControlSocket.ConnectToRoom(_ownedWaitingRoom.SessionId, _roomFlow.LocalClientId, token);
                 _heartbeatService.Start(_ownedWaitingRoom.SessionId, token);
                 PollOwnedRoomStatusAsync(_ownedWaitingRoom.SessionId, token).Forget();
             }
@@ -187,7 +194,7 @@ namespace WebRtcV2.Presentation
 
         private async UniTaskVoid PollOwnedRoomStatusAsync(string sessionId, CancellationToken ct)
         {
-            var interval = TimeSpan.FromSeconds(Math.Max(0.5f, _config.workerEndpoint.pollingIntervalSec));
+            var interval = TimeSpan.FromSeconds(Math.Max(10f, _config.workerEndpoint.roomHeartbeatIntervalSec));
 
             try
             {
@@ -203,12 +210,7 @@ namespace WebRtcV2.Presentation
 
                     if (room.IsJoined)
                     {
-                        _notificationService.NotifyPeerJoined(room.SessionId, room.DisplayName);
-                        _heartbeatService.Stop();
-                        StopLobbyTokenOnly();
-                        _ownedWaitingRoom = room;
-                        _showCall?.Invoke();
-                        _connectionFlow.ConnectAsCallerAsync(room.SessionId, _appToken).Forget();
+                        BeginOwnedRoomConnectAsync(room).Forget();
                         return;
                     }
 
@@ -235,7 +237,7 @@ namespace WebRtcV2.Presentation
             _isTransitioning = true;
             _statusView.ClearError();
             _lobbyView.SetLoading(true);
-            StopLobbyLoops();
+            StopLobbyLoops(disconnectSocket: true);
 
             try
             {
@@ -247,6 +249,7 @@ namespace WebRtcV2.Presentation
                     return;
                 }
 
+                _roomControlSocket.ConnectToRoom(result.SessionId, _roomFlow.LocalClientId, _appToken);
                 _showCall?.Invoke();
                 _connectionFlow.ConnectAsCalleeAsync(result.SessionId, result.CallerPeerId, _appToken).Forget();
             }
@@ -265,11 +268,63 @@ namespace WebRtcV2.Presentation
             }
         }
 
-        private void StopLobbyLoops()
+        private void HandleRoomControlEvent(RoomControlEvent controlEvent)
+        {
+            if (_disposed || controlEvent == null || _ownedWaitingRoom == null)
+                return;
+            if (!string.Equals(controlEvent.sessionId, _ownedWaitingRoom.SessionId, StringComparison.Ordinal))
+                return;
+
+            switch (controlEvent.type)
+            {
+                case RoomControlEvent.Types.PeerJoined:
+                    BeginOwnedRoomConnectAsync(_ownedWaitingRoom).Forget();
+                    break;
+                case RoomControlEvent.Types.RoomState when string.Equals(controlEvent.roomStatus, "joined", StringComparison.OrdinalIgnoreCase):
+                    BeginOwnedRoomConnectAsync(_ownedWaitingRoom).Forget();
+                    break;
+                case RoomControlEvent.Types.RoomClosed:
+                    _statusView.ShowError("Комната ожидания закрылась. Создаем заново...");
+                    RequestBootstrapAsync(_appToken).Forget();
+                    break;
+            }
+        }
+
+        private async UniTaskVoid BeginOwnedRoomConnectAsync(RoomModel room)
+        {
+            if (_disposed || _isTransitioning || room == null || _ownedWaitingRoom == null)
+                return;
+            if (!string.Equals(room.SessionId, _ownedWaitingRoom.SessionId, StringComparison.Ordinal))
+                return;
+
+            _isTransitioning = true;
+            try
+            {
+                _notificationService.NotifyPeerJoined(room.SessionId, room.DisplayName);
+                _heartbeatService.Stop();
+                StopLobbyTokenOnly();
+                _ownedWaitingRoom = room;
+                _showCall?.Invoke();
+                _connectionFlow.ConnectAsCallerAsync(room.SessionId, _appToken).Forget();
+            }
+            catch (Exception e)
+            {
+                _statusView.ShowError($"Waiting room connect failed: {e.Message}");
+                await RequestBootstrapAsync(_appToken);
+            }
+            finally
+            {
+                _isTransitioning = false;
+            }
+        }
+
+        private void StopLobbyLoops(bool disconnectSocket)
         {
             _ownedWaitingRoom = null;
             _heartbeatService.Stop();
             StopLobbyTokenOnly();
+            if (disconnectSocket)
+                _roomControlSocket.Disconnect();
         }
 
         private void StopLobbyTokenOnly()
