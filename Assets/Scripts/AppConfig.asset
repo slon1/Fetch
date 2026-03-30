@@ -1,0 +1,42 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6b375267d9ea2764293b621bdec3af5d, type: 3}
+  m_Name: AppConfig
+  m_EditorClassIdentifier: Assembly-CSharp::WebRtcV2.Config.AppConfig
+  workerEndpoint:
+    baseUrl: https://webrtc-signaler.slon-ru-tmp.workers.dev
+    pollingIntervalSec: 3
+    signalingMessageTtlSec: 60
+    roomTtlSec: 180
+    roomHeartbeatIntervalSec: 20
+    roomHeartbeatTimeoutSec: 30
+  ice:
+    relayOnly: 0
+    stunUrls:
+    - stun:stun.l.google.com:19302
+    - stun:stun.relay.metered.ca:80
+  room:
+    maxDisplayNameLength: 24
+  connection:
+    reconnectMaxAttempts: 3
+    reconnectDelayBaseSec: 2
+    iceDisconnectedGraceMs: 3000
+    iceGatheringTimeoutMs: 3000
+    iceRestartTimeoutMs: 8000
+    initialIceConnectTimeoutMs: 20000
+    signalingPollTimeoutMs: 30000
+  policy:
+    statsPollingIntervalMs: 1000
+    degradeRttThresholdMs: 400
+    degradeJitterThresholdMs: 100
+    degradePacketLossPercent: 10
+    degradeConsecutiveBadSamples: 3
