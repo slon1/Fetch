@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -280,7 +280,7 @@ namespace WebRtcV2.Application.Connection {
                     fromPeerId = _localPeerId,
                     messageId = Guid.NewGuid().ToString("N"),
                     type = SignalingEnvelope.Types.Hangup,
-                    ttlMs = 15000,
+                    ttlMs = _config.workerEndpoint.signalingMessageTtlSec * 1000,
                     sentAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     payloadJson = "{}"
                 };

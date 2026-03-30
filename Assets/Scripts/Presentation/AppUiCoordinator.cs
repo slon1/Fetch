@@ -152,7 +152,9 @@ namespace WebRtcV2.Presentation
         {
             try
             {
-                float graceSeconds = Math.Max(5f, _config.workerEndpoint.pollingIntervalSec * 3f);
+                float graceSeconds = Math.Max(
+                    20f,
+                    _config.workerEndpoint.signalingMessageTtlSec + (_config.workerEndpoint.pollingIntervalSec * 2f));
                 await UniTask.Delay(TimeSpan.FromSeconds(graceSeconds), cancellationToken: _appToken)
                     .SuppressCancellationThrow();
 
