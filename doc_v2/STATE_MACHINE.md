@@ -2,18 +2,43 @@
 
 ## Overview
 
-The project no longer uses a monolithic state enum that encodes both lifecycle
-and media mode together.
+The project no longer uses a monolithic enum that mixes call lifecycle, media mode
+and booth line behavior together.
 
 Current design:
 
-- lifecycle is handled by `ConnectionStateMachine`
-- media, route, and signaling mode are handled by `ConnectionSession`
-- UI reads `ConnectionSnapshot`
+- booth line state is handled by the booth flow and booth snapshot model
+- WebRTC lifecycle is handled by `ConnectionStateMachine`
+- media, route and signaling mode are handled by `ConnectionSession`
+- UI reads booth and connection snapshots instead of poking coordinators directly
 
 This keeps the FSM small and avoids combinatorial state growth.
 
-## Lifecycle States
+## Booth Line State
+
+`BoothLineState`
+
+- `Idle`
+- `Dialing`
+- `RingingOutgoing`
+- `RingingIncoming`
+- `Connecting`
+- `InCall`
+
+Typical booth transitions:
+
+- `Idle -> Dialing -> RingingOutgoing -> Connecting -> InCall`
+- `Idle -> RingingIncoming -> Connecting -> InCall`
+- `RingingIncoming -> Idle` on reject or timeout
+- `RingingOutgoing -> Idle` on reject, offline, busy or timeout
+- `InCall -> Idle` on hangup or terminal cleanup
+
+Important rule:
+
+- after any booth socket reconnect, the client must trust the server `line_snapshot`
+  over stale local assumptions about ringing or connecting state
+
+## Connection Lifecycle States
 
 `ConnectionLifecycleState`
 
@@ -26,7 +51,7 @@ This keeps the FSM small and avoids combinatorial state growth.
 - `Failed`
 - `Closed`
 
-## Allowed Shape of Transitions
+## Allowed Shape of WebRTC Transitions
 
 Typical connect path:
 
@@ -55,7 +80,7 @@ Cancellation path:
 
 - active state -> `Closed`
 
-## State Axes Outside the FSM
+## State Axes Outside the WebRTC FSM
 
 ### MediaMode
 
@@ -65,8 +90,9 @@ Cancellation path:
 
 Current meaning:
 
-- `AudioOnly`: normal voice call baseline
+- `AudioOnly`: normal voice-call baseline
 - `DataOnly`: degraded mode after quality-policy decision
+- `Full`: reserved for a future richer video path
 
 ### RouteMode
 
@@ -77,6 +103,7 @@ Current meaning:
 Current runtime mostly uses:
 
 - `Direct`
+- `Relay` when fallback or forced relay path wins
 
 ### SignalingMode
 
@@ -84,13 +111,29 @@ Current runtime mostly uses:
 - `WorkerWebSocket`
 - `Manual`
 
-Current runtime uses:
+Current runtime semantics:
 
-- `WorkerPolling`
+- booth control events use `WorkerWebSocket`
+- SDP and hangup slots still use `WorkerPolling`
+- `Manual` remains legacy/debug-only
 
-## Snapshot Model
+## Snapshot Models
 
-`ConnectionSnapshot` is the user-facing read model.
+### BoothSnapshot
+
+`BoothSnapshot` is the read model for the dial screen.
+
+It contains:
+
+- booth number
+- booth line state
+- peer booth number when relevant
+- active or pending call reference when relevant
+- optional message for user-facing status
+
+### ConnectionSnapshot
+
+`ConnectionSnapshot` is the user-facing WebRTC read model.
 
 It contains:
 
@@ -99,17 +142,17 @@ It contains:
 - route mode
 - signaling mode
 - session identity
-- creator role
+- caller/callee role information
 - data-channel readiness
 - reconnect attempt count
 - last error
 
-UI should read the snapshot instead of reaching into coordinators.
+UI should render from snapshots instead of reaching into coordinators.
 
 ## Compatibility Layer
 
-There is still a temporary compatibility mapping from `ConnectionSnapshot` back
-to the older `ConnectionState` enum for code that has not fully migrated.
+There is still a temporary compatibility mapping from `ConnectionSnapshot` back to
+the older `ConnectionState` enum for code that has not fully migrated.
 
 This compatibility layer should eventually be removed.
 
@@ -117,20 +160,24 @@ This compatibility layer should eventually be removed.
 
 Current intended mapping:
 
-- `Connected + AudioOnly` -> normal active call
-- `Connected + DataOnly` -> limited connection
-- `Recovering` -> trying to restore session
-- `Failed` -> session lost
-- `Closed` -> session ended intentionally or by cleanup
+- booth `Idle` -> ready to dial or receive a call
+- booth `RingingIncoming` -> user should accept or reject
+- booth `RingingOutgoing` -> waiting for remote answer
+- booth `Connecting` + connection `Preparing/Signaling/Connecting` -> call setup in progress
+- booth `InCall` + connection `Connected` -> active call
+- connection `Recovering` -> trying to restore media/session
+- connection `Failed` -> session lost
+- connection `Closed` -> session ended intentionally or by remote hangup
 
 ## Recovery Semantics
 
-Recovery is intentionally separate from degradation.
+Recovery is intentionally separate from booth line state.
 
 - poor quality alone does not mean the lifecycle leaves `Connected`
 - `Disconnected` may start grace handling and then move to `Recovering`
 - successful ICE restart returns to `Connected`
 - failed recovery budget ends in `Failed`
+- booth line state should return to `Idle` only when booth control flow confirms terminal teardown
 
 ## Why This Model Was Chosen
 
@@ -140,7 +187,8 @@ The old style of states such as:
 - `ConnectedDataOnly`
 - `RelayFallback`
 - `ManualHandshakePending`
+- `WaitingForPeer`
 
-creates unnecessary state explosion.
+creates unnecessary state explosion and mixes booth UX with WebRTC internals.
 
 The current model is smaller, easier to log, and easier to extend.

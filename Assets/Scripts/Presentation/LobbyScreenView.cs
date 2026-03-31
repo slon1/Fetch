@@ -1,134 +1,207 @@
-﻿using System;
-using System.Collections.Generic;
+using System;
 using TMPro;
 using UnityEngine;
+using UnityEngine.Serialization;
 using UnityEngine.UI;
-using WebRtcV2.Application.Room;
 
 namespace WebRtcV2.Presentation
 {
-    /// <summary>
-    /// View for the lobby screen. In iteration 3 it is driven by auto-lobby state,
-    /// while keeping the same inspector wiring and room item prefab setup.
-    /// </summary>
     public class LobbyScreenView : MonoBehaviour
     {
         [Header("Root")]
-        [SerializeField] private GameObject root;
+        [FormerlySerializedAs("root")]
+        [SerializeField] private GameObject screenRoot;
 
-        [Header("Inputs")]
-        [SerializeField] private TMP_InputField displayNameInput;
+        [Header("Booth Input")]
+        [FormerlySerializedAs("displayNameInput")]
+        [SerializeField] private TMP_InputField dialNumberInput;
 
-        [Header("Buttons")]
-        [SerializeField] private Button createButton;
-        [SerializeField] private Button refreshButton;
+        [Header("Actions")]
+        [FormerlySerializedAs("createButton")]
+        [SerializeField] private Button primaryActionButton;
 
-        [Header("Room List")]
-        [SerializeField] private Transform roomListContainer;
-        [SerializeField] private RoomListItemView roomItemPrefab;
+        [FormerlySerializedAs("refreshButton")]
+        [SerializeField] private Button secondaryActionButton;
 
-        [Header("State")]
-        [SerializeField] private TMP_Text loadingLabel;
+        [Header("Status")]
+        [FormerlySerializedAs("loadingLabel")]
+        [SerializeField] private TMP_Text statusText;
 
-        public event Action<string> OnCreateRoom;
-        public event Action OnRefreshRooms;
-        public event Action<RoomModel> OnRoomSelected;
+        private TMP_Text _primaryActionLabel;
+        private TMP_Text _secondaryActionLabel;
+        private Mode _mode;
 
-        private readonly List<RoomListItemView> _items = new List<RoomListItemView>();
+        public event Action<string> OnDialRequested;
+        public event Action OnAcceptRequested;
+        public event Action OnRejectRequested;
+
+        private enum Mode
+        {
+            Initializing,
+            Idle,
+            OutgoingRinging,
+            IncomingRinging,
+            Connecting,
+        }
 
         private void Awake()
         {
-            if (createButton != null)
-                createButton.onClick.AddListener(HandleCreateClicked);
-            if (refreshButton != null)
-                refreshButton.onClick.AddListener(HandleRefreshClicked);
+            _primaryActionLabel = primaryActionButton != null
+                ? primaryActionButton.GetComponentInChildren<TMP_Text>(true)
+                : null;
+            _secondaryActionLabel = secondaryActionButton != null
+                ? secondaryActionButton.GetComponentInChildren<TMP_Text>(true)
+                : null;
+
+            if (primaryActionButton != null)
+                primaryActionButton.onClick.AddListener(HandlePrimaryActionClicked);
+            if (secondaryActionButton != null)
+                secondaryActionButton.onClick.AddListener(HandleSecondaryActionClicked);
         }
 
-        public void Show() => root.SetActive(true);
-
-        public void Hide() => root.SetActive(false);
-
-        public void ShowLoadingState(string message)
+        public void Show()
         {
-            SetAutoLobbyChrome(showRefresh: false);
-            RenderRooms(Array.Empty<RoomModel>());
-            SetLoading(true, message);
+            if (screenRoot != null)
+                screenRoot.SetActive(true);
         }
 
-        public void ShowJoinableRooms(RoomModel[] rooms)
+        public void Hide()
         {
-            SetAutoLobbyChrome(showRefresh: true);
-            SetLoading(false, rooms != null && rooms.Length > 0
-                ? "Выберите комнату"
-                : "Свободных комнат нет");
-            RenderRooms(rooms);
+            if (screenRoot != null)
+                screenRoot.SetActive(false);
         }
 
-        public void ShowWaitingRoom(RoomModel room)
+        public void ShowInitializing(string message)
         {
-            SetAutoLobbyChrome(showRefresh: false);
-            RenderRooms(Array.Empty<RoomModel>());
-            string roomName = room?.DisplayName ?? "Комната";
-            SetLoading(false, $"Ожидание собеседника\n{roomName}");
+            _mode = Mode.Initializing;
+            SetDialInputVisible(false);
+            SetPrimaryAction(false, string.Empty);
+            SetSecondaryAction(false, string.Empty);
+            SetStatus(message);
         }
 
-        public void SetLoading(bool loading) => SetLoading(loading, loading ? "Загрузка..." : null);
-
-        public void RenderRooms(RoomModel[] rooms)
+        public void ShowIdle(string boothNumber, string message = null)
         {
-            ClearRoomItems();
-            if (rooms == null) return;
+            _mode = Mode.Idle;
+            SetDialInputVisible(true);
+            SetPrimaryAction(true, "Call");
+            SetSecondaryAction(false, string.Empty);
+            SetStatus(BuildIdleStatus(boothNumber, message));
+        }
 
-            foreach (var room in rooms)
+        public void ShowOutgoingRinging(string boothNumber, string targetNumber)
+        {
+            _mode = Mode.OutgoingRinging;
+            SetDialInputVisible(false);
+            SetPrimaryAction(false, string.Empty);
+            SetSecondaryAction(true, "Cancel");
+            SetStatus($"Your number: {SafeNumber(boothNumber)}\nOutgoing call\nTo: {SafeNumber(targetNumber)}");
+        }
+
+        public void ShowIncomingCall(string boothNumber, string callerNumber)
+        {
+            _mode = Mode.IncomingRinging;
+            SetDialInputVisible(false);
+            SetPrimaryAction(true, "Accept");
+            SetSecondaryAction(true, "Reject");
+            SetStatus($"Your number: {SafeNumber(boothNumber)}\nIncoming call\nFrom: {SafeNumber(callerNumber)}");
+        }
+
+        public void ShowConnecting(string boothNumber, string peerNumber)
+        {
+            _mode = Mode.Connecting;
+            SetDialInputVisible(false);
+            SetPrimaryAction(false, string.Empty);
+            SetSecondaryAction(false, string.Empty);
+            SetStatus($"Your number: {SafeNumber(boothNumber)}\nConnecting...\nPeer: {SafeNumber(peerNumber)}");
+        }
+
+        public void SetBusy(bool isBusy)
+        {
+            if (_mode == Mode.Idle && primaryActionButton != null)
+                primaryActionButton.interactable = !isBusy;
+        }
+
+        private void HandlePrimaryActionClicked()
+        {
+            switch (_mode)
             {
-                var item = Instantiate(roomItemPrefab, roomListContainer);
-                item.Bind(room);
-                item.OnJoinClicked += r => OnRoomSelected?.Invoke(r);
-                _items.Add(item);
+                case Mode.Idle:
+                    string number = dialNumberInput != null ? dialNumberInput.text?.Trim() : string.Empty;
+                    if (!string.IsNullOrWhiteSpace(number))
+                        OnDialRequested?.Invoke(number);
+                    break;
+                case Mode.IncomingRinging:
+                    OnAcceptRequested?.Invoke();
+                    break;
             }
         }
 
-        private void SetAutoLobbyChrome(bool showRefresh)
+        private void HandleSecondaryActionClicked()
         {
-            if (displayNameInput != null)
-                displayNameInput.gameObject.SetActive(false);
-            if (createButton != null)
-                createButton.gameObject.SetActive(false);
-            if (refreshButton != null)
-                refreshButton.gameObject.SetActive(showRefresh);
-        }
-
-        private void SetLoading(bool loading, string message)
-        {
-            if (refreshButton != null)
-                refreshButton.interactable = !loading;
-
-            foreach (var item in _items)
-                item.SetInteractable(!loading);
-
-            if (loadingLabel != null)
+            switch (_mode)
             {
-                loadingLabel.text = message ?? string.Empty;
-                loadingLabel.gameObject.SetActive(!string.IsNullOrWhiteSpace(message));
+                case Mode.OutgoingRinging:
+                case Mode.IncomingRinging:
+                    OnRejectRequested?.Invoke();
+                    break;
             }
         }
 
-        private void HandleCreateClicked()
+        private void SetDialInputVisible(bool visible)
         {
-            string name = displayNameInput != null ? displayNameInput.text?.Trim() : string.Empty;
-            if (string.IsNullOrEmpty(name)) return;
-            OnCreateRoom?.Invoke(name);
+            if (dialNumberInput == null)
+                return;
+
+            dialNumberInput.gameObject.SetActive(visible);
+            if (!visible)
+                return;
+
+            dialNumberInput.text = string.Empty;
+            dialNumberInput.ActivateInputField();
         }
 
-        private void HandleRefreshClicked() => OnRefreshRooms?.Invoke();
-
-        private void ClearRoomItems()
+        private void SetPrimaryAction(bool visible, string label)
         {
-            foreach (var item in _items)
+            if (primaryActionButton != null)
             {
-                if (item != null) Destroy(item.gameObject);
+                primaryActionButton.gameObject.SetActive(visible);
+                primaryActionButton.interactable = visible;
             }
-            _items.Clear();
+
+            if (_primaryActionLabel != null)
+                _primaryActionLabel.text = label;
         }
+
+        private void SetSecondaryAction(bool visible, string label)
+        {
+            if (secondaryActionButton != null)
+            {
+                secondaryActionButton.gameObject.SetActive(visible);
+                secondaryActionButton.interactable = visible;
+            }
+
+            if (_secondaryActionLabel != null)
+                _secondaryActionLabel.text = label;
+        }
+
+        private void SetStatus(string message)
+        {
+            if (statusText == null)
+                return;
+
+            statusText.text = message ?? string.Empty;
+            statusText.gameObject.SetActive(true);
+        }
+
+        private static string BuildIdleStatus(string boothNumber, string message)
+        {
+            string baseText = $"Your number: {SafeNumber(boothNumber)}\nEnter a 12-digit number to call";
+            return string.IsNullOrWhiteSpace(message)
+                ? baseText
+                : baseText + "\n" + message.Trim();
+        }
+
+        private static string SafeNumber(string number) => string.IsNullOrWhiteSpace(number) ? "-" : number.Trim();
     }
 }

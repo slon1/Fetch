@@ -5,13 +5,13 @@
 The app is a Unity-based 1:1 P2P messenger designed for hostile or degraded
 networks.
 
-The current architecture aims to keep:
+The current product model is a telephone switchboard model:
 
-- UI thin
-- orchestration explicit
-- transport details inside adapters and clients
-- recovery policy separate from low-level sampling
-- failure states diagnosable on real user devices
+- every install owns one stable booth number
+- the user can see their own number and manually dial another one
+- booth availability is determined by a live Durable Object WebSocket
+- call setup is manual: dial, ring, accept or reject
+- WebRTC transport logic stays adaptive and independent from booth UX
 
 ## Layering
 
@@ -22,16 +22,15 @@ transport code directly.
 
 Current presentation layer:
 
-- `LobbyScreenView`
+- `LobbyScreenView` acting as the booth dial screen shell
 - `CallScreenView`
 - `ConnectionStatusView`
-- `RoomListItemView`
 
 Responsibilities:
 
 - bind scene references
 - expose UI events
-- render lobby, call and status state
+- render booth, call and status state
 - stay ignorant of Worker and WebRTC internals
 
 ### Bootstrap
@@ -46,8 +45,6 @@ Responsibilities:
 - wire application services to views
 - own app lifetime
 - switch into fatal-error mode when startup/runtime reaches a managed terminal fault
-
-`AppBootstrap` must not own offer/answer logic or raw HTTP details.
 
 ### Crash Handling
 
@@ -67,40 +64,37 @@ Responsibilities:
 - collect recent Unity log tail
 - capture managed startup/runtime failures
 - persist latest local crash report
-- show a standalone runtime fatal overlay independent of the normal lobby/call UI
+- show a standalone runtime fatal overlay independent of the normal booth/call UI
 
 Current limitation:
 
 - native plugin crashes or hard IL2CPP aborts are not guaranteed to be caught
 
-### Application Layer
+## Application Layer
 
-The application layer is split by use case.
+### Booth
 
-#### Room
-
-`RoomFlowCoordinator`
+`BoothFlowCoordinator`
 
 Responsibilities:
 
-- bootstrap lobby on startup
-- list rooms
-- create own waiting room
-- join foreign room
-- observe waiting-room join through transitional polling/socket logic in the current branch
-- delete stale or terminal rooms
-- carry a known limitation: the current semi-automatic lobby can still produce parallel waiting rooms after both peers return from a call
+- register or confirm local booth ownership
+- keep the local booth socket connected
+- publish booth line snapshots to UI
+- dial another booth number
+- accept or reject incoming calls
+- mark local line as `in_call`
+- hang up and reset booth line state
 
-`RoomHeartbeatService`
+Booth model invariants:
 
-Responsibilities:
+- one booth number per install in v1
+- one active socket per booth in v1
+- booth ownership is persistent
+- booth online/offline is live-presence only and comes from the socket
+- booth reconnect must trust `line_snapshot` from the server as source of truth
 
-- keep waiting-room ownership alive with periodic heartbeat lease
-- stop/start with lobby lifecycle
-- stay independent from WebRTC degradation logic and fast room events
-- remain a coarse cleanup/presence mechanism even after WebSocket control migration
-
-#### Connection
+### Connection
 
 `ConnectionFlowCoordinator`
 
@@ -116,15 +110,25 @@ Responsibilities:
 - degradation execution
 - recovery execution
 
-This coordinator is still the main orchestrator and should stay readable. If it
-grows too much, future extraction should happen along responsibilities, not as
-an abstraction explosion.
+This coordinator remains the main WebRTC orchestrator and should stay readable.
+The booth migration should not push booth product-state concerns into ICE/media code.
 
 ## Runtime State Model
 
-The runtime model separates lifecycle from media, route and signaling axes.
+The runtime model separates booth state from media/session state.
 
-### Lifecycle
+### Booth Line State
+
+`BoothLineState`
+
+- `Idle`
+- `Dialing`
+- `RingingOutgoing`
+- `RingingIncoming`
+- `Connecting`
+- `InCall`
+
+### Connection Lifecycle
 
 `ConnectionLifecycleState`
 
@@ -174,12 +178,32 @@ Additional runtime fields:
 
 It owns:
 
-- lobby and room API calls
-- room heartbeat calls
+- booth registration
+- dial / accept / reject / hangup / connected commands
 - signaling slot API calls
 - polling behavior for missing signaling messages
 
 It does not own business decisions.
+
+### BoothSocketService
+
+`BoothSocketService` owns the local control WebSocket to the user's own booth.
+
+Responsibilities:
+
+- connect and reconnect booth socket
+- dispatch booth control events to the application layer
+- keep socket lifecycle separate from booth business logic
+
+Socket events currently cover:
+
+- `line_snapshot`
+- `incoming_call`
+- `outgoing_ringing`
+- `call_accepted`
+- `call_rejected`
+- `remote_hangup`
+- `line_reset`
 
 ### WebRtcPeerAdapter
 
@@ -203,154 +227,105 @@ Current behavior:
 - push-to-talk controls whether outgoing voice is enabled
 - camera/video path exists, but the product baseline is still audio + data first
 
-## Signaling and Lobby Strategy
+## Server Domain Model
 
-Current signaling strategy is intentionally simple.
+### BoothDurableObject
 
-- Cloudflare Worker + Durable Objects
-- HTTP polling today; WebSocket control channel planned next for low-latency room events
-- non-trickle ICE
-- one signaling slot per `(sessionId, type)`
-- room state and lobby membership coordinated by Durable Objects, not KV
+One booth DO per booth number.
 
-Current room and signaling message types:
+Responsibilities:
 
-- room status: `waiting`, `joined`, `closed`
-- signaling slots: `offer`, `answer`, `hangup`
+- hold booth registration record
+- hold booth line state
+- terminate superseded booth sockets
+- emit `line_snapshot` and booth control events
+- answer whether a booth is registered and online
 
-ICE restart currently reuses the same `offer` / `answer` slots and does not add
-new protocol message types yet.
+Persistent booth record is intentionally minimal:
 
-Lobby behavior:
+- `boothNumber`
+- `ownerClientId`
+- `createdAt`
+- `lastSeenAt`
 
-- app bootstraps lobby automatically on start
-- own waiting room is hidden from own lobby list
-- if no foreign rooms are available, client creates its own waiting room
-- WebRTC starts only after an actual room join
-- waiting-room heartbeat is used for coarse presence/freshness lease only
-- low-latency events such as `peer_joined` are planned to move to a DO WebSocket control channel
-- joined rooms disappear from lobby immediately, but room state lives until call terminal state
-- known limitation: when both peers re-enter lobby at the same time, the current room-first UX can still create two waiting rooms and leave both sides waiting; this behavior is considered temporary and will be redesigned
+Presence is not persistent; it is derived from the live socket.
+
+### LobbyDurableObject
+
+The class name remains for migration convenience, but functionally it now acts as the
+switchboard coordinator.
+
+Responsibilities:
+
+- validate dial attempts
+- resolve `not_registered`, `offline`, `busy` and `ringing`
+- create call bindings
+- coordinate accept / reject / connected / hangup transitions
+- reset both booths on terminal call actions
+
+### RoomDurableObject
+
+The class name remains for migration convenience, but functionally it now acts as the
+call-session store.
+
+Responsibilities:
+
+- store one call record per `callId`
+- hold signaling slots (`offer`, `answer`, `hangup`)
+- enforce ring timeout and terminal cleanup retention
+- provide durable storage independent of booth socket reconnects
 
 ## Control Plane Split
 
 The runtime control plane is intentionally hybrid.
 
-Through Durable Objects:
+Through booth socket events:
 
+- incoming call wakeup
+- outgoing ringing
+- call accepted
+- call rejected
+- remote hangup
+- line reset
+- line snapshot after reconnect
+
+Through HTTP endpoints:
+
+- booth registration
+- dial / accept / reject / hangup / connected commands
 - `offer`
 - `answer`
 - `hangup`
-- ICE restart signaling
-- waiting-room state
-- room heartbeat / coarse presence lease
-- future room/control WebSocket events (`peer_joined`, `remote_hangup`, `room_closed`)
+- ICE restart signaling reuse through the same slot mechanism
 
 Through `RTCDataChannel`:
 
 - chat
 - lightweight live UX commands such as peer-speaking state
 
-This split keeps room/session coordination in the Worker while keeping chat and
-fast in-call commands off the signaling backend.
+This split keeps low-latency booth control on WebSocket while keeping SDP and
+other retriable payloads on HTTP.
+
+## Call Role Rules
+
+- caller is always offerer
+- callee is always answerer
+- booth/socket reconnect does not redefine call roles
+- if both users dial each other nearly simultaneously, the switchboard should avoid a user-facing failure and converge onto one pending call
 
 ## ICE Server Strategy
 
 Current ICE configuration is built from two sources:
 
 - STUN URLs from `AppConfig`
-- TURN credentials and TURN URLs from `StreamingAssets/dev-secrets.json`
+- TURN URLs and credentials from `StreamingAssets/dev-secrets.json`
 
-Current Metered integration uses static dashboard credentials for development.
+Transport assumptions:
 
-Planned next step:
+- direct path first
+- relay fallback on the next attempt after selected failure paths
+- multiple STUN/TURN endpoints supported
+- relay path can carry a stricter media policy later, including video disable
 
-- automatic relay fallback on the next connection attempt after direct/recovery failure
-
-Runtime behavior:
-
-- default mode uses `RTCIceTransportPolicy.All`
-- `relayOnly` switches to `RTCIceTransportPolicy.Relay`
-- diagnostics log the selected nominated route, for example:
-  - `relay/relay udp`
-  - `srflx/host`
-- relay path currently does not force-disable video yet; that remains a future
-  policy decision
-
-## Quality and Degradation
-
-### Sampling
-
-`WebRtcStatsSampler` periodically polls `RTCPeerConnection.GetStats()`.
-
-Current `QualitySnapshot` fields:
-
-- RTT
-- jitter
-- packet loss
-- available outgoing bitrate
-- ICE state
-- selected nominated ICE route summary
-
-Some fields may be unavailable depending on Unity WebRTC reports and are
-treated as nullable or absent.
-
-### Policy
-
-`ConnectionPolicy` evaluates `ConnectionSnapshot + QualitySnapshot`.
-
-Current implemented decision:
-
-- `DowngradeToDataOnly`
-
-Current downgrade behavior is pragmatic MVP:
-
-- logical mode changes to `DataOnly`
-- audio send path is disabled
-- no full renegotiated remove-track flow yet
-
-## Recovery
-
-`RecoveryCoordinator` owns retry budget, grace period and backoff.
-
-Current recovery strategy:
-
-1. `Disconnected` starts a short grace period.
-2. If the connection does not recover, lifecycle moves to `Recovering`.
-3. A bounded ICE restart attempt is made.
-4. If recovery succeeds, lifecycle returns to `Connected`.
-5. If recovery budget is exhausted, lifecycle moves to `Failed`.
-6. Terminal call states return the user to auto-lobby.
-
-Current simplifications:
-
-- caller initiates ICE restart
-- callee answers restart offer
-- same peer connection is reused
-- no glare handling
-- no relay escalation
-- no peer recreation
-
-## Background Notifications
-
-Android best-effort local notifications are used while the Unity app is still
-alive in background.
-
-Current semantics:
-
-- `PeerJoined` notification is auxiliary
-- `Connected` notification is the main alert
-- no remote push backend is involved
-- if the app is killed and heartbeat dies, notifications stop entirely
-
-## Legacy Boundary
-
-The old manual signaling prototype remains only as a reference.
-
-Current legacy boundary:
-
-- `Assets/Scripts/ManualSignaling.cs`
-- `Assets/Scenes/SampleScene.unity`
-
-It should not drive new architectural decisions except as a transport sanity
-reference.
+The booth migration must not simplify away transport resilience.
+That transport stack is one of the main assets of the project.

@@ -17,22 +17,22 @@ namespace WebRtcV2.Config
             [Tooltip("Base URL of the Cloudflare Worker, without trailing slash")]
             public string baseUrl = "https://webrtc-signaler.slon-ru-tmp.workers.dev";
 
-            [Tooltip("How often to poll Worker for signaling messages and room status, seconds")]
+            [Tooltip("How often to poll Worker for signaling slot messages, seconds")]
             public float pollingIntervalSec = 1.5f;
 
-            [Tooltip("TTL for a posted signal message on the Worker, seconds")]
+            [Tooltip("TTL for a posted signaling message on the Worker, seconds")]
             public int signalingMessageTtlSec = 60;
 
-            [Tooltip("TTL for a room entry in the lobby index, seconds")]
+            [Tooltip("Legacy room TTL kept only for migration compatibility")]
             public int roomTtlSec = 180;
 
-            [Tooltip("How often the waiting room owner refreshes presence via heartbeat, seconds")]
+            [Tooltip("Legacy waiting-room heartbeat interval kept only for migration compatibility")]
             public float roomHeartbeatIntervalSec = 20f;
 
-            [Tooltip("How long a waiting room stays visible without heartbeat, seconds")]
+            [Tooltip("Legacy waiting-room heartbeat timeout kept only for migration compatibility")]
             public int roomHeartbeatTimeoutSec = 30;
 
-            [Tooltip("Reconnect delay for the room control WebSocket, seconds")]
+            [Tooltip("Reconnect delay for the booth control WebSocket, seconds")]
             public float roomControlSocketReconnectDelaySec = 2f;
         }
 
@@ -53,7 +53,7 @@ namespace WebRtcV2.Config
         [System.Serializable]
         public class RoomSection
         {
-            [Tooltip("Max characters in a display name")]
+            [Tooltip("Legacy serialized section name. Currently used only for display-name length limits.")]
             public int maxDisplayNameLength = 24;
         }
 
@@ -105,4 +105,3 @@ namespace WebRtcV2.Config
         }
     }
 }
-

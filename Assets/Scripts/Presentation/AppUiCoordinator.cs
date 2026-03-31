@@ -2,27 +2,20 @@ using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
+using WebRtcV2.Application.Booth;
 using WebRtcV2.Application.Connection;
-using WebRtcV2.Application.Room;
-using WebRtcV2.Config;
 using WebRtcV2.Shared;
 using WebRtcV2.Transport;
 
 namespace WebRtcV2.Presentation
 {
-    /// <summary>
-    /// Scene-level UI router for the main game scene.
-    /// Owns screen transitions, auto-lobby bootstrap and terminal-state handling.
-    /// </summary>
     public sealed class AppUiCoordinator : IDisposable
     {
         private readonly ConnectionStatusView _statusView;
-        private readonly IRoomFlow _roomFlow;
+        private readonly IBoothFlow _boothFlow;
         private readonly IConnectionFlow _connectionFlow;
-        private readonly AppConfig _config;
         private readonly CancellationToken _appToken;
         private readonly AndroidLocalNotificationService _notificationService;
-        private readonly RoomControlSocketService _roomControlSocket;
         private readonly LobbyUiController _lobbyController;
         private readonly CallUiController _callController;
 
@@ -31,36 +24,28 @@ namespace WebRtcV2.Presentation
         private bool _disposed;
 
         public AppUiCoordinator(
-            AppConfig config,
             LobbyScreenView lobbyView,
             CallScreenView callView,
             ConnectionStatusView statusView,
             AudioSource remoteAudioSource,
             MediaCaptureService mediaCapture,
-            IRoomFlow roomFlow,
+            IBoothFlow boothFlow,
             IConnectionFlow connectionFlow,
-            RoomHeartbeatService heartbeatService,
-            RoomControlSocketService roomControlSocket,
             AndroidLocalNotificationService notificationService,
             CancellationToken appToken)
         {
             _statusView = statusView;
-            _roomFlow = roomFlow;
+            _boothFlow = boothFlow;
             _connectionFlow = connectionFlow;
-            _config = config;
-            _roomControlSocket = roomControlSocket;
             _notificationService = notificationService;
             _appToken = appToken;
 
             _lobbyController = new LobbyUiController(
                 lobbyView,
                 statusView,
-                roomFlow,
+                boothFlow,
                 connectionFlow,
-                heartbeatService,
-                roomControlSocket,
                 notificationService,
-                config,
                 appToken,
                 ShowCall);
 
@@ -98,7 +83,9 @@ namespace WebRtcV2.Presentation
             if (snapshot.LifecycleState == ConnectionLifecycleState.Connected &&
                 _previousSnapshot.LifecycleState != ConnectionLifecycleState.Connected)
             {
-                _notificationService.NotifyConnected(snapshot.SessionId, _roomFlow.LocalDisplayName);
+                SyncBoothLineInCallAsync(snapshot.SessionId).Forget();
+                string peer = _boothFlow.CurrentSnapshot?.PeerNumber;
+                _notificationService.NotifyConnected(snapshot.SessionId, peer);
             }
 
             if (snapshot.LifecycleState == ConnectionLifecycleState.Closed ||
@@ -110,6 +97,24 @@ namespace WebRtcV2.Presentation
             _previousSnapshot = snapshot;
         }
 
+        private async UniTaskVoid SyncBoothLineInCallAsync(string sessionId)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+                return;
+
+            try
+            {
+                await _boothFlow.MarkInCallAsync(sessionId, CancellationToken.None);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[AppUiCoordinator] Failed to mark line in-call: {e.Message}");
+            }
+        }
+
         private async UniTaskVoid HandleTerminalSnapshotAsync(ConnectionSnapshot snapshot)
         {
             if (_isHandlingTerminalSnapshot) return;
@@ -118,13 +123,12 @@ namespace WebRtcV2.Presentation
             try
             {
                 _notificationService.CancelSessionNotification(snapshot.SessionId);
-                _roomControlSocket?.Disconnect();
                 _callController.ClearTransientMedia();
+
+                if (!string.IsNullOrWhiteSpace(snapshot.SessionId))
+                    await _boothFlow.HangupLineAsync(snapshot.SessionId, CancellationToken.None).SuppressCancellationThrow();
+
                 ShowLobby();
-
-                if (snapshot.IsCreator && !string.IsNullOrEmpty(snapshot.SessionId))
-                    DeleteOwnedRoomAfterHangupGraceAsync(snapshot.SessionId).Forget();
-
                 if (!_appToken.IsCancellationRequested)
                     await _lobbyController.EnterLobbyAsync(_appToken);
             }
@@ -133,7 +137,7 @@ namespace WebRtcV2.Presentation
             }
             catch (Exception e)
             {
-                _statusView.ShowError($"Return to lobby failed: {e.Message}");
+                _statusView.ShowError($"Return to booth failed: {e.Message}");
             }
             finally
             {
@@ -151,27 +155,6 @@ namespace WebRtcV2.Presentation
         {
             _lobbyController.Hide();
             _callController.Show();
-        }
-
-        private async UniTaskVoid DeleteOwnedRoomAfterHangupGraceAsync(string sessionId)
-        {
-            try
-            {
-                float graceSeconds = Math.Max(
-                    20f,
-                    _config.workerEndpoint.signalingMessageTtlSec + (_config.workerEndpoint.pollingIntervalSec * 2f));
-                await UniTask.Delay(TimeSpan.FromSeconds(graceSeconds), cancellationToken: _appToken)
-                    .SuppressCancellationThrow();
-
-                if (_appToken.IsCancellationRequested || string.IsNullOrWhiteSpace(sessionId))
-                    return;
-
-                await _roomFlow.DeleteRoomAsync(sessionId, CancellationToken.None);
-            }
-            catch (Exception e)
-            {
-                WLog.Warn("AppUi", $"Deferred room delete failed: {e.Message}");
-            }
         }
     }
 }

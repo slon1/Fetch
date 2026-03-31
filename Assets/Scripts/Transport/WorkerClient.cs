@@ -9,10 +9,6 @@ using WebRtcV2.Shared;
 
 namespace WebRtcV2.Transport
 {
-    /// <summary>
-    /// HTTP client for all Cloudflare Worker endpoints: room management and signaling slots.
-    /// This class owns the HTTP transport only. Business logic lives in coordinators.
-    /// </summary>
     public class WorkerClient
     {
         private readonly AppConfig _config;
@@ -20,102 +16,145 @@ namespace WebRtcV2.Transport
 
         public WorkerClient(AppConfig config) => _config = config;
 
-        public async UniTask<RoomEntryDto[]> GetRoomsAsync(CancellationToken ct = default)
-        {
-            string json = await GetAsync($"{Base}/api/rooms", ct);
-            if (json == null) return Array.Empty<RoomEntryDto>();
+        // ===== New booth/call APIs =====
 
-            try
-            {
-                var wrapper = JsonUtility.FromJson<RoomListResponse>(json);
-                return wrapper?.rooms ?? Array.Empty<RoomEntryDto>();
-            }
-            catch (Exception e)
-            {
-                WLog.Warn("WorkerClient", $"GetRooms parse error: {e.Message}");
-                return Array.Empty<RoomEntryDto>();
-            }
+        public static class RegisterBoothErrors
+        {
+            public const string NumberConflict = "number_conflict";
         }
 
-        public async UniTask<RoomEntryDto> GetRoomAsync(string sessionId, CancellationToken ct = default)
+        public static class DialOutcomes
         {
-            string json = await GetAsync($"{Base}/api/rooms/{sessionId}", ct);
-            if (string.IsNullOrWhiteSpace(json)) return null;
-
-            try
-            {
-                return JsonUtility.FromJson<RoomEntryDto>(json);
-            }
-            catch (Exception e)
-            {
-                WLog.Warn("WorkerClient", $"GetRoom parse error: {e.Message}");
-                return null;
-            }
+            public const string Ringing = "ringing";
+            public const string NotRegistered = "not_registered";
+            public const string Offline = "offline";
+            public const string Busy = "busy";
         }
 
-        public async UniTask<RoomEntryDto> CreateRoomAsync(
-            string displayName, string sessionId, string creatorPeerId, CancellationToken ct = default)
+        public async UniTask<RegisterBoothResponseDto> RegisterBoothAsync(
+            string boothNumber,
+            string ownerClientId,
+            CancellationToken ct = default)
         {
-            var body = JsonUtility.ToJson(new CreateRoomRequest
+            var body = JsonUtility.ToJson(new RegisterBoothRequest
             {
-                displayName = displayName,
-                sessionId = sessionId,
-                creatorPeerId = creatorPeerId,
-                roomTtlSec = _config.workerEndpoint.roomTtlSec,
-                heartbeatTtlSec = _config.workerEndpoint.roomHeartbeatTimeoutSec,
+                boothNumber = boothNumber,
+                ownerClientId = ownerClientId,
             });
-            var (ok, responseBody) = await PostAsync($"{Base}/api/rooms", body, ct);
-            if (!ok || string.IsNullOrWhiteSpace(responseBody))
-                return null;
+            var (ok, responseBody) = await PostAsync($"{Base}/api/booths/register", body, ct);
+            if (string.IsNullOrWhiteSpace(responseBody))
+                return ok ? null : new RegisterBoothResponseDto { ok = false, error = "register_failed" };
 
             try
             {
-                var response = JsonUtility.FromJson<CreateRoomResponse>(responseBody);
-                return response?.room;
+                var response = JsonUtility.FromJson<RegisterBoothResponseDto>(responseBody);
+                response.ok = ok && response.ok;
+                return response;
             }
             catch (Exception e)
             {
-                WLog.Warn("WorkerClient", $"CreateRoom parse error: {e.Message}");
-                return null;
+                WLog.Warn("WorkerClient", $"RegisterBooth parse error: {e.Message}");
+                return ok ? null : new RegisterBoothResponseDto { ok = false, error = "register_parse_error" };
             }
         }
 
-        public async UniTask<bool> HeartbeatRoomAsync(
-            string sessionId, string creatorPeerId, CancellationToken ct = default)
+        public async UniTask<DialResponseDto> DialAsync(
+            string callerNumber,
+            string callerClientId,
+            string targetNumber,
+            CancellationToken ct = default)
         {
-            var body = JsonUtility.ToJson(new HeartbeatRoomRequest
+            var body = JsonUtility.ToJson(new DialRequest
             {
-                creatorPeerId = creatorPeerId,
+                callerNumber = callerNumber,
+                callerClientId = callerClientId,
+                targetNumber = targetNumber,
             });
-            var (ok, _) = await PostAsync($"{Base}/api/rooms/{sessionId}/heartbeat", body, ct);
-            return ok;
-        }
-
-        /// <summary>
-        /// Marks a waiting room as joined. Returns session info on success, null on failure.
-        /// The room is no longer returned by <see cref="GetRoomsAsync"/> after this call.
-        /// </summary>
-        public async UniTask<JoinRoomResponseDto> JoinRoomAsync(
-            string sessionId, CancellationToken ct = default)
-        {
-            var (ok, body) = await PostAsync($"{Base}/api/rooms/{sessionId}/join", "{}", ct);
-            if (!ok || body == null) return null;
+            var (ok, responseBody) = await PostAsync($"{Base}/api/dial", body, ct);
+            if (string.IsNullOrWhiteSpace(responseBody))
+                return ok ? null : new DialResponseDto { ok = false, outcome = null, error = "dial_failed" };
 
             try
             {
-                return JsonUtility.FromJson<JoinRoomResponseDto>(body);
+                var response = JsonUtility.FromJson<DialResponseDto>(responseBody);
+                response.ok = ok && response.ok;
+                return response;
             }
             catch (Exception e)
             {
-                WLog.Warn("WorkerClient", $"JoinRoom parse error: {e.Message}");
-                return null;
+                WLog.Warn("WorkerClient", $"Dial parse error: {e.Message}");
+                return ok ? null : new DialResponseDto { ok = false, error = "dial_parse_error" };
             }
         }
 
-        public async UniTask<bool> DeleteRoomAsync(string sessionId, CancellationToken ct = default)
+        public async UniTask<CallActionResponseDto> AcceptCallAsync(
+            string callId,
+            string boothNumber,
+            string clientId,
+            CancellationToken ct = default)
         {
-            return await DeleteAsync($"{Base}/api/rooms/{sessionId}", ct);
+            return await PostCallActionAsync($"{Base}/api/calls/{callId}/accept", boothNumber, clientId, ct);
         }
+
+        public async UniTask<bool> RejectCallAsync(
+            string callId,
+            string boothNumber,
+            string clientId,
+            CancellationToken ct = default)
+        {
+            var response = await PostCallActionAsync($"{Base}/api/calls/{callId}/reject", boothNumber, clientId, ct);
+            return response != null && response.ok;
+        }
+
+        public async UniTask<bool> HangupCallAsync(
+            string callId,
+            string boothNumber,
+            string clientId,
+            CancellationToken ct = default)
+        {
+            var response = await PostCallActionAsync($"{Base}/api/calls/{callId}/hangup", boothNumber, clientId, ct);
+            return response != null && response.ok;
+        }
+
+        public async UniTask<bool> MarkCallConnectedAsync(
+            string callId,
+            string boothNumber,
+            string clientId,
+            CancellationToken ct = default)
+        {
+            var response = await PostCallActionAsync($"{Base}/api/calls/{callId}/connected", boothNumber, clientId, ct);
+            return response != null && response.ok;
+        }
+
+        private async UniTask<CallActionResponseDto> PostCallActionAsync(
+            string url,
+            string boothNumber,
+            string clientId,
+            CancellationToken ct)
+        {
+            var body = JsonUtility.ToJson(new CallActionRequest
+            {
+                boothNumber = boothNumber,
+                clientId = clientId,
+            });
+            var (ok, responseBody) = await PostAsync(url, body, ct);
+            if (string.IsNullOrWhiteSpace(responseBody))
+                return ok ? null : new CallActionResponseDto { ok = false, error = "call_action_failed" };
+
+            try
+            {
+                var response = JsonUtility.FromJson<CallActionResponseDto>(responseBody);
+                response.ok = ok && response.ok;
+                return response;
+            }
+            catch (Exception e)
+            {
+                WLog.Warn("WorkerClient", $"Call action parse error: {e.Message}");
+                return ok ? null : new CallActionResponseDto { ok = false, error = "call_action_parse_error" };
+            }
+        }
+
+        // ===== Signaling =====
 
         public async UniTask<bool> PostSignalAsync(SignalingEnvelope envelope, CancellationToken ct = default)
         {
@@ -124,7 +163,6 @@ namespace WebRtcV2.Transport
             return ok;
         }
 
-        /// <summary>Returns null when no message is available (404) or on error.</summary>
         public async UniTask<SignalingEnvelope> GetSignalAsync(
             string sessionId, string type, CancellationToken ct = default)
         {
@@ -205,14 +243,13 @@ namespace WebRtcV2.Transport
             try { await UniTask.WaitUntil(() => req.isDone, cancellationToken: ct); }
             catch (OperationCanceledException) { req.Abort(); throw; }
 
+            string responseText = req.downloadHandler?.text;
             if (req.result != UnityWebRequest.Result.Success)
             {
-                string responseText = req.downloadHandler?.text;
-                WLog.Warn("WorkerClient",
-                    $"POST {url} failed: {req.error} ({req.responseCode}) body={responseText}");
-                return (false, null);
+                WLog.Warn("WorkerClient", $"POST {url} failed: {req.error} ({req.responseCode}) body={responseText}");
+                return (false, responseText);
             }
-            return (true, req.downloadHandler.text);
+            return (true, responseText);
         }
 
         private async UniTask<bool> DeleteAsync(string url, CancellationToken ct)
@@ -225,63 +262,64 @@ namespace WebRtcV2.Transport
 
             if (req.result != UnityWebRequest.Result.Success)
             {
-                WLog.Warn("WorkerClient", $"DELETE {url} failed: {req.error}");
+                WLog.Warn("WorkerClient", $"DELETE {url} failed: {req.error} ({req.responseCode})");
                 return false;
             }
             return req.responseCode == 200 || req.responseCode == 204;
         }
 
         [Serializable]
-        public class RoomEntryDto
-        {
-            public string id;
-            public string sessionId;
-            public string displayName;
-            public string creatorPeerId;
-            public string status;
-            public long createdAt;
-            public long expiresAt;
-            public long joinedAt;
-            public long closedAt;
-            public long lastHeartbeatAt;
-            public long heartbeatExpiresAt;
-        }
-
-        [Serializable]
-        public class JoinRoomResponseDto
+        public class RegisterBoothResponseDto
         {
             public bool ok;
-            public string sessionId;
-            public string callerPeerId;
+            public string boothNumber;
+            public string ownerClientId;
+            public string error;
         }
 
         [Serializable]
-        private class RoomListResponse
-        {
-            public RoomEntryDto[] rooms;
-        }
-
-        [Serializable]
-        private class CreateRoomResponse
+        public class DialResponseDto
         {
             public bool ok;
-            public RoomEntryDto room;
+            public string outcome;
+            public string callId;
+            public string callerNumber;
+            public string calleeNumber;
+            public string callerClientId;
+            public string error;
         }
 
         [Serializable]
-        private class CreateRoomRequest
+        public class CallActionResponseDto
         {
-            public string displayName;
-            public string sessionId;
-            public string creatorPeerId;
-            public int roomTtlSec;
-            public int heartbeatTtlSec;
+            public bool ok;
+            public string callId;
+            public string callerNumber;
+            public string calleeNumber;
+            public string callerClientId;
+            public string error;
         }
 
         [Serializable]
-        private class HeartbeatRoomRequest
+        private class RegisterBoothRequest
         {
-            public string creatorPeerId;
+            public string boothNumber;
+            public string ownerClientId;
+        }
+
+        [Serializable]
+        private class DialRequest
+        {
+            public string callerNumber;
+            public string callerClientId;
+            public string targetNumber;
+        }
+
+        [Serializable]
+        private class CallActionRequest
+        {
+            public string boothNumber;
+            public string clientId;
         }
     }
 }

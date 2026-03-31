@@ -7,52 +7,43 @@ This folder documents the current Unity 1:1 messenger baseline.
 The product target is a resilient communication app for degraded or partially
 blocked networks, not a generic video-call demo.
 
-Current priorities:
+Current product baseline:
 
-- keep a working 1:1 audio + data baseline
-- survive short network disruptions
-- keep lobby behavior deterministic
-- keep failures diagnosable on real user devices
+- one stable 12-digit booth number per install
+- manual dialing instead of room discovery
+- live booth reachability through a Durable Object WebSocket
+- HTTP signaling slots for SDP and hangup envelopes
+- adaptive WebRTC transport with direct-first policy and relay fallback
+- field diagnostics kept local-first through crash guard and logs
 
 ## Current Working Baseline
 
-As of the current codebase, the following flow works in `game.unity`:
+As of the current codebase, the working product flow is booth-first.
 
-- auto-lobby bootstrap on app start
-- list waiting rooms from Cloudflare Durable Objects
-- hide own waiting room from own lobby list
-- auto-create own waiting room when no foreign rooms are available
-- join foreign waiting room
-- start WebRTC only after room join
+Working flow in `game.unity`:
+
+- register or confirm local booth number on app start
+- connect booth control socket
+- show own number
+- manually dial another number
+- receive one of: `not_registered`, `offline`, `busy`, `ringing`
+- incoming call with manual `accept` / `reject`
+- caller starts as offerer
+- callee starts as answerer
 - audio call
 - chat over `RTCDataChannel`
 - hangup
 - recovery through ICE restart after short disruptions
 - fatal startup/runtime error screen for managed failures
 
-Important caveat:
-
-- the media/signaling baseline is considered working
-- the current semi-automatic lobby/waiting-room logic is not considered product-stable
-- after terminal call return, both peers can still end up recreating separate waiting rooms and remain stuck in parallel waiting state
-- treat the current lobby implementation as a temporary baseline that is scheduled for redesign
-
-The baseline transport assumptions are:
-
-- Cloudflare Worker + Durable Objects
-- HTTP polling signaling
-- non-trickle ICE
-- direct route first
-- STUN by default
-- TURN integration through `StreamingAssets/dev-secrets.json`
-- `relayOnly` can force `RTCIceTransportPolicy.Relay` for explicit TURN testing
+The old room/lobby implementation is no longer part of the active client path.
+Legacy room flow classes were removed from this branch after the booth migration stabilized.
 
 ## What Is Implemented
 
 - `AppBootstrap` as guarded composition root for `game.unity`
-- presentation views instead of UI-driven business logic
-- `RoomFlowCoordinator` for auto-lobby and room operations
-- `RoomHeartbeatService` for waiting-room presence
+- `BoothFlowCoordinator` for booth registration, dialing and line state
+- `BoothSocketService` for low-latency booth events
 - `ConnectionFlowCoordinator` for WebRTC session orchestration
 - lifecycle-only FSM
 - `ConnectionSession` and `ConnectionSnapshot`
@@ -65,20 +56,21 @@ The baseline transport assumptions are:
 - TURN integration with Metered static credentials
 - relay/direct diagnostics through selected ICE route logging
 - crash-reporting pipeline with local persistence and runtime fatal overlay
+- local Android notifications for incoming call and connected state
 
 ## What Is Not Finished Yet
 
-- polished multi-device GUI/UX
-- stable lobby/pairing UX; current semi-automatic lobby remains a known weak spot`n- relay-aware media policy such as auto-disable video on relay path
-- manual signaling mode in the new stack
-- WebSocket control channel for room events
-- finalized best-effort Android local notifications after WebSocket control migration
+- historical server-side class names such as `LobbyDurableObject` and `RoomDurableObject` still reflect their migration origin
+- polished booth/call GUI across devices
+- stronger stale line cleanup for extreme crash / simultaneous-offline cases
+- relay-aware media policy such as auto-disable video on relay path
 - remote crash-report upload or email delivery
 - native/IL2CPP crash capture beyond managed exception guards
+- future booth extensions like contacts, aliases, voicemail or multi-device ownership
 
 ## Main Runtime Model
 
-Lifecycle is tracked separately from media and route.
+Lifecycle is tracked separately from booth line state, media and route.
 
 - `ConnectionLifecycleState`
   - `Idle`
@@ -89,6 +81,13 @@ Lifecycle is tracked separately from media and route.
   - `Recovering`
   - `Failed`
   - `Closed`
+- `BoothLineState`
+  - `Idle`
+  - `Dialing`
+  - `RingingOutgoing`
+  - `RingingIncoming`
+  - `Connecting`
+  - `InCall`
 - `MediaMode`
   - `AudioOnly`
   - `DataOnly`
@@ -105,26 +104,27 @@ Lifecycle is tracked separately from media and route.
 ## Key Files
 
 - `Assets/Scripts/Bootstrap/AppBootstrap.cs`
-- `Assets/Scripts/Application/Room/RoomFlowCoordinator.cs`
-- `Assets/Scripts/Application/Room/RoomHeartbeatService.cs`
+- `Assets/Scripts/Application/Booth/IBoothFlow.cs`
+- `Assets/Scripts/Application/Booth/BoothFlowCoordinator.cs`
 - `Assets/Scripts/Application/Connection/ConnectionFlowCoordinator.cs`
 - `Assets/Scripts/Application/Connection/ConnectionSession.cs`
 - `Assets/Scripts/Application/Connection/RecoveryCoordinator.cs`
+- `Assets/Scripts/Transport/BoothSocketService.cs`
 - `Assets/Scripts/Transport/WorkerClient.cs`
 - `Assets/Scripts/Transport/WebRtcPeerAdapter.cs`
 - `Assets/Scripts/Transport/MediaCaptureService.cs`
-- `Assets/Scripts/Transport/WebRtcStatsSampler.cs`
 - `Assets/Scripts/CrashHandling/CrashCoordinator.cs`
 - `Assets/Scripts/CrashHandling/FatalErrorView.cs`
 - `Assets/Scripts/Server/worker.js`
+- `wrangler.toml`
 
 ## Next Priorities
 
-1. Polish lobby and call-screen UX across devices.
-2. Migrate room/control fast-path from polling to a Durable Object WebSocket channel.
-3. Finalize best-effort Android local notifications after the WebSocket control channel lands.
-4. Decide whether relay path should force audio + chat only.
-5. Improve crash-screen wording and error-code readability for field testing.
+1. Polish booth and call UI for the new manual dial flow.
+2. Harden stale `connecting` / `in_call` cleanup after extreme failures.
+3. Decide whether relay path should force audio + chat only.
+4. Improve user-facing wording and diagnostics around booth reconnects.
+5. Rename remaining historical scene and config identifiers when it is safe for serialized assets.
 
 ## Voice UX Note
 

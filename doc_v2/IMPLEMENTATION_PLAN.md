@@ -4,16 +4,16 @@
 
 This file tracks the actual project path, not an aspirational rewrite.
 
-The codebase already has a working vertical slice in `game.unity`, so the next
-iterations should build on that reality instead of restarting architecture from
-scratch.
+The codebase now has a working booth-first communication baseline in `game.unity`.
+The transport stack, recovery logic and TURN integration from earlier stages remain
+core assets and are carried forward into the new product model.
 
 Current branch posture:
 
-- media, signaling, recovery and crash-guard baseline are considered working enough to archive as a milestone
-- the current semi-automatic lobby is explicitly not the final product model
-- known lobby failure mode: after a call ends, both peers can recreate separate waiting rooms and remain stuck in parallel waiting state
-- next iteration is expected to redesign pairing/lobby UX rather than continue stacking fixes onto the current room-first flow
+- booth-first manual dialing is the active product path
+- crash guard, WebRTC transport, recovery and TURN integration are working baseline assets
+- the old room-first client path was removed from this branch after the booth migration stabilized
+- future work should evolve the booth model, not revive waiting-room behavior
 
 ## Completed Stages
 
@@ -41,7 +41,6 @@ Delivered:
 - `game.unity` as new application scene
 - `AppBootstrap`
 - view-based UI composition
-- room list/create/join baseline
 - audio call
 - chat over DataChannel
 - hangup
@@ -70,8 +69,7 @@ Delivered:
 
 Current limitation:
 
-- `DataOnly` is still a pragmatic MVP approximation, not a fully renegotiated
-  transport-mode switch
+- `DataOnly` is still a pragmatic MVP approximation, not a fully renegotiated transport-mode switch
 
 ### Stage 4. Recovery Baseline
 
@@ -87,7 +85,7 @@ Delivered:
 Current tested result:
 
 - short network loss can recover within the same session
-- longer outages end in `Failed` and return to lobby
+- longer outages end in `Failed` and return to idle UI
 
 ### Stage 5. Durable Objects Migration
 
@@ -96,25 +94,11 @@ Status: done
 Delivered:
 
 - Cloudflare Worker signaling migrated from KV to Durable Objects
-- room state stored in `RoomDurableObject`
-- lobby registry handled by `LobbyDurableObject`
-- `/api/rooms/{id}` and `/api/rooms/{id}/heartbeat` support
-- signaling delays caused by KV visibility removed from the happy path
+- signaling/session state moved into Durable Object storage
+- Worker-backed control flow became the new baseline
+- signaling delays caused by KV visibility were removed from the happy path
 
-### Stage 6. Auto-Lobby and Waiting Room Presence
-
-Status: done
-
-Delivered:
-
-- auto-lobby bootstrap on app start
-- own waiting room hidden from own room list
-- create-own-room flow when no foreign room exists
-- join-first flow when foreign rooms exist
-- waiting-room heartbeat through `RoomHeartbeatService`
-- return to lobby after terminal session states using the same bootstrap logic
-
-### Stage 7. Crash Guard and Fatal Error Screen
+### Stage 6. Crash Guard and Fatal Error Screen
 
 Status: done
 
@@ -131,62 +115,68 @@ Current limitation:
 
 - native plugin or IL2CPP hard crashes are outside this managed guardrail
 
-## Active Short-Term Work
+### Stage 7. Relay Fallback and TURN Hardening Baseline
 
-### Stage 8. WebSocket Control Channel and Reduced Heartbeat Role
+Status: done enough for current branch
 
-Status: partially landed, not accepted as product baseline
+Delivered:
 
-Goals:
-
-- move low-latency room/control events from polling to a Durable Object WebSocket channel
-- keep heartbeat only as a coarse waiting-room lease / cleanup mechanism
-- remove fast-path dependence on room polling for `peer_joined` and control wakeups
-
-Acceptance:
-
-- waiting-room owner is notified about `peer_joined` without room polling delay
-- remote hangup and room-close events no longer depend on polling cadence
-- heartbeat interval can be relaxed because it is no longer on the fast path
-
-Current caveat before redesign:
-
-- first WebSocket/control pieces may exist in the branch, but the surrounding semi-automatic lobby behavior is still considered unstable
-- Stage 8 should not be treated as complete until the next pairing/lobby UX redesign lands
-
-### Stage 9. TURN Operational Hardening
-
-Status: in progress
-
-Goals:
-
-- treat TURN as a real deploy/test milestone, not a placeholder
-- verify credentials flow in practice
-- test harder NAT and blocked direct-path conditions
-- decide whether relay path should automatically downgrade media policy
-
-Acceptance:
-
-- TURN path is verified end to end
-- operator setup is documented
-- direct vs relay behavior is observable in logs
-
-Current progress:
-
-- Metered static TURN credentials are wired through `dev-secrets.json`
-- relay candidates are gathered
-- forced relay mode works through `relayOnly`
+- Metered static TURN credentials wired through `dev-secrets.json`
+- relay candidates gathered in practice
+- explicit `relayOnly` remains available for testing
+- relay fallback is queued for the next attempt after selected direct-path failures
 - selected ICE route is logged from the nominated pair
-- direct and relay runs are both exercised against the Durable Objects backend
 
 Remaining work:
 
-- add automatic relay fallback for the next connection attempt after direct/recovery failure
 - decide final relay media policy
 - document operator playbook for TURN credentials and quota monitoring
-- optionally add clearer user-facing relay/direct indicator later
+
+### Stage 8. Simplified Telephone Booth Architecture
+
+Status: working baseline
+
+Goals achieved:
+
+- removed lobby, waiting-room and heartbeat from the product flow
+- gave every install one stable booth number
+- kept only minimal persistent ownership registry on the server
+- derived online/offline only from a live booth WebSocket
+- made call setup explicit and manual: dial, ring, accept, reject, hangup
+- kept signaling payloads on HTTP while moving control events to booth socket
+- preserved the existing adaptive WebRTC transport stack
+
+Delivered in code and manually verified on the branch:
+
+- `BoothFlowCoordinator`
+- `BoothSocketService`
+- stable 12-digit booth-number assignment from local identity
+- Worker booth registration endpoint
+- Worker booth event WebSocket endpoint
+- dial / accept / reject / hangup / connected endpoints
+- booth line snapshot and remote hangup propagation
+- booth UI reusing the former lobby screen shell
+- line-state sync to `in_call`
+- local incoming-call notifications when app is not in focus but socket is alive
+- legacy room-flow client classes removed from the branch
+
+Current known caveats:
+
+- stale active-call cleanup after extreme simultaneous crash/offline cases still needs hardening
+- booth UI names in some scene/prefab assets still reflect their old lobby origin
+- server-side Durable Object class names still reflect their migration origin
 
 ## Deferred Work
+
+### Stage 9. Mobile Notification Polish
+
+Status: partially landed, not finalized
+
+Goals:
+
+- incoming-call notification polish
+- better wording and timing for connected/incoming notifications
+- platform-specific UX cleanup after booth flow is verified
 
 ### Stage 10. Video Policy and UX
 
@@ -197,40 +187,23 @@ Reason:
 - video multiplies complexity in quality management, degradation and UX
 - the audio/data baseline should remain stable before adding more aggressive video logic
 
-### Stage 11. Manual Mode in New Stack
+### Stage 11. Booth UX Extensions
 
 Status: deferred
 
-Goals:
+Possible future work:
 
-- manual SDP export/import in the new architecture
-- dedicated UI for manual bootstrap
+- contacts or favorites
+- alias or display label for a booth number
+- voicemail or short text fallback
+- multi-device ownership
 
-Reason:
-
-- current lobby, crash guard and TURN work are more valuable first
-
-### Stage 12. Android Local Notifications Finalization
-
-Status: deferred until Stage 8 lands
-
-Reason:
-
-- `Connected` can be notified locally today, but `PeerJoined` should use the future WebSocket control channel instead of polling/heartbeat
-- final best-effort notifications should be wired after the room/control socket exists
-
-### Stage 13. Larger Room Models / SFU Path
-
-Status: deferred research
-
-Reason:
-
-- current product baseline is still 1:1
-- larger rooms and host-to-many media delivery likely require a separate SFU/media strategy
+These are not part of v1.
 
 ## Notes for Future Iterations
 
 - keep crash diagnostics local-first unless there is a strong reason to add backend upload
-- prefer incremental DO-backed improvements over rewrites of the entire signaling path
-- do not let GUI refactors blur room, signaling and connection responsibilities
+- keep booth presence socket-based; do not reintroduce heartbeat unless there is a proven product need
+- preserve the current transport resilience work instead of rebuilding signaling/media layers from scratch
+- after any booth socket reconnect, prefer server `line_snapshot` over stale local UI assumptions
 - if useful, limited Sonnet budget can be used via the user for scoped code writing, review or refactoring; do not assume direct connector access

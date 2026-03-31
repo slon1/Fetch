@@ -1,66 +1,53 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using WebRtcV2.Application.Booth;
 using WebRtcV2.Application.Connection;
-using WebRtcV2.Application.Room;
-using WebRtcV2.Config;
 using WebRtcV2.Shared;
-using WebRtcV2.Transport;
 
 namespace WebRtcV2.Presentation
 {
-    /// <summary>
-    /// Owns lobby-specific UI orchestration for auto-lobby, waiting room presence,
-    /// join flow and re-bootstrap after terminal call states.
-    /// </summary>
     public sealed class LobbyUiController : IDisposable
     {
         private readonly LobbyScreenView _lobbyView;
         private readonly ConnectionStatusView _statusView;
-        private readonly IRoomFlow _roomFlow;
+        private readonly IBoothFlow _boothFlow;
         private readonly IConnectionFlow _connectionFlow;
-        private readonly RoomHeartbeatService _heartbeatService;
-        private readonly RoomControlSocketService _roomControlSocket;
         private readonly AndroidLocalNotificationService _notificationService;
-        private readonly AppConfig _config;
         private readonly CancellationToken _appToken;
         private readonly Action _showCall;
-        private readonly object _bootstrapSync = new object();
 
-        private CancellationTokenSource _lobbyCts;
-        private UniTaskCompletionSource _bootstrapCompletion;
-        private RoomModel _ownedWaitingRoom;
+        private CallSessionRef _currentPendingCall;
+        private string _startedCallId;
+        private bool _initialized;
         private bool _isTransitioning;
-        private bool _bootstrapInFlight;
         private bool _disposed;
 
         public LobbyUiController(
             LobbyScreenView lobbyView,
             ConnectionStatusView statusView,
-            IRoomFlow roomFlow,
+            IBoothFlow boothFlow,
             IConnectionFlow connectionFlow,
-            RoomHeartbeatService heartbeatService,
-            RoomControlSocketService roomControlSocket,
             AndroidLocalNotificationService notificationService,
-            AppConfig config,
             CancellationToken appToken,
             Action showCall)
         {
             _lobbyView = lobbyView;
             _statusView = statusView;
-            _roomFlow = roomFlow;
+            _boothFlow = boothFlow;
             _connectionFlow = connectionFlow;
-            _heartbeatService = heartbeatService;
-            _roomControlSocket = roomControlSocket;
             _notificationService = notificationService;
-            _config = config;
             _appToken = appToken;
             _showCall = showCall;
 
-            _lobbyView.OnCreateRoom += HandleCreateRoom;
-            _lobbyView.OnRefreshRooms += HandleRefreshRoomsClicked;
-            _lobbyView.OnRoomSelected += HandleRoomSelected;
-            _roomControlSocket.OnEvent += HandleRoomControlEvent;
+            _lobbyView.OnDialRequested += HandleDialRequested;
+            _lobbyView.OnAcceptRequested += HandleAcceptRequested;
+            _lobbyView.OnRejectRequested += HandleRejectRequested;
+
+            _boothFlow.OnSnapshotChanged += HandleBoothSnapshotChanged;
+            _boothFlow.OnIncomingCall += HandleIncomingCall;
+            _boothFlow.OnCallAccepted += HandleCallAccepted;
+            _boothFlow.OnCallEnded += HandleCallEnded;
         }
 
         public void Dispose()
@@ -68,157 +55,76 @@ namespace WebRtcV2.Presentation
             if (_disposed) return;
             _disposed = true;
 
-            StopLobbyLoops(disconnectSocket: true);
-            _lobbyView.OnCreateRoom -= HandleCreateRoom;
-            _lobbyView.OnRefreshRooms -= HandleRefreshRoomsClicked;
-            _lobbyView.OnRoomSelected -= HandleRoomSelected;
-            _roomControlSocket.OnEvent -= HandleRoomControlEvent;
+            _lobbyView.OnDialRequested -= HandleDialRequested;
+            _lobbyView.OnAcceptRequested -= HandleAcceptRequested;
+            _lobbyView.OnRejectRequested -= HandleRejectRequested;
+
+            _boothFlow.OnSnapshotChanged -= HandleBoothSnapshotChanged;
+            _boothFlow.OnIncomingCall -= HandleIncomingCall;
+            _boothFlow.OnCallAccepted -= HandleCallAccepted;
+            _boothFlow.OnCallEnded -= HandleCallEnded;
         }
 
-        public void Show() => _lobbyView.Show();
-
-        public void Hide()
+        public void Show()
         {
-            StopLobbyLoops(disconnectSocket: false);
-            _lobbyView.Hide();
+            _lobbyView.Show();
+            RenderSnapshot(_boothFlow.CurrentSnapshot, null);
         }
 
-        public UniTask EnterLobbyAsync(CancellationToken ct) => RequestBootstrapAsync(ct);
+        public void Hide() => _lobbyView.Hide();
 
-        private async void HandleCreateRoom(string _)
-        {
-            if (_isTransitioning) return;
-            await RequestBootstrapAsync(_appToken);
-        }
-
-        private void HandleRefreshRoomsClicked()
-        {
-            if (_isTransitioning) return;
-            RequestBootstrapAsync(_appToken).Forget();
-        }
-
-        private UniTask RequestBootstrapAsync(CancellationToken ct)
-        {
-            if (_disposed)
-                return UniTask.CompletedTask;
-
-            UniTask waitTask;
-            bool shouldStart;
-
-            lock (_bootstrapSync)
-            {
-                if (_bootstrapInFlight)
-                {
-                    waitTask = _bootstrapCompletion?.Task ?? UniTask.CompletedTask;
-                    shouldStart = false;
-                }
-                else
-                {
-                    _bootstrapInFlight = true;
-                    _bootstrapCompletion = new UniTaskCompletionSource();
-                    waitTask = _bootstrapCompletion.Task;
-                    shouldStart = true;
-                }
-            }
-
-            if (shouldStart)
-                RunBootstrapAsync(ct).Forget();
-
-            return waitTask;
-        }
-
-        private async UniTaskVoid RunBootstrapAsync(CancellationToken ct)
-        {
-            try
-            {
-                await BootstrapCoreAsync(ct);
-            }
-            finally
-            {
-                UniTaskCompletionSource completion;
-                lock (_bootstrapSync)
-                {
-                    completion = _bootstrapCompletion;
-                    _bootstrapCompletion = null;
-                    _bootstrapInFlight = false;
-                }
-
-                completion?.TrySetResult();
-            }
-        }
-
-        private async UniTask BootstrapCoreAsync(CancellationToken ct)
+        public async UniTask EnterLobbyAsync(CancellationToken ct)
         {
             if (_disposed) return;
 
-            StopLobbyLoops(disconnectSocket: true);
+            if (!_initialized)
+            {
+                _lobbyView.ShowInitializing("Registering booth...");
+                await _boothFlow.InitializeAsync(ct);
+                _initialized = true;
+            }
+
+            var snapshot = _boothFlow.CurrentSnapshot;
+            RenderSnapshot(snapshot, null);
+            TryStartCallFromSnapshot(snapshot);
+        }
+
+        private async void HandleDialRequested(string targetNumber)
+        {
+            if (_disposed || _isTransitioning) return;
             _isTransitioning = true;
             _statusView.ClearError();
-            _lobbyView.ShowLoadingState("Загрузка комнат...");
-
-            _lobbyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var token = _lobbyCts.Token;
+            _lobbyView.SetBusy(true);
 
             try
             {
-                var bootstrap = await _roomFlow.BootstrapLobbyAsync(token);
-                if (bootstrap.Mode == LobbyBootstrapMode.JoinExisting)
+                string normalizedNumber = NormalizeDialNumber(targetNumber);
+                if (normalizedNumber == null)
                 {
-                    _ownedWaitingRoom = null;
-                    _lobbyView.ShowJoinableRooms(bootstrap.ForeignRooms);
+                    _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Enter a 12-digit number");
                     return;
                 }
 
-                _ownedWaitingRoom = bootstrap.OwnedRoom;
-                if (_ownedWaitingRoom == null)
-                    throw new InvalidOperationException("owned waiting room was not created");
-
-                _lobbyView.ShowWaitingRoom(_ownedWaitingRoom);
-                _roomControlSocket.ConnectToRoom(_ownedWaitingRoom.SessionId, _roomFlow.LocalClientId, token);
-                _heartbeatService.Start(_ownedWaitingRoom.SessionId, token);
-                PollOwnedRoomStatusAsync(_ownedWaitingRoom.SessionId, token).Forget();
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception e)
-            {
-                _statusView.ShowError($"Lobby bootstrap failed: {e.Message}");
-                _lobbyView.ShowJoinableRooms(Array.Empty<RoomModel>());
-            }
-            finally
-            {
-                _isTransitioning = false;
-            }
-        }
-
-        private async UniTaskVoid PollOwnedRoomStatusAsync(string sessionId, CancellationToken ct)
-        {
-            var interval = TimeSpan.FromSeconds(Math.Max(10f, _config.workerEndpoint.roomHeartbeatIntervalSec));
-
-            try
-            {
-                while (!ct.IsCancellationRequested && !string.IsNullOrWhiteSpace(sessionId))
+                var result = await _boothFlow.DialAsync(normalizedNumber, _appToken);
+                switch (result.Outcome)
                 {
-                    var room = await _roomFlow.GetRoomAsync(sessionId, ct);
-                    if (room == null || room.IsClosed)
-                    {
-                        _statusView.ShowError("Комната ожидания завершилась. Создаем заново...");
-                        await RequestBootstrapAsync(_appToken);
-                        return;
-                    }
-
-                    if (room.IsJoined)
-                    {
-                        BeginOwnedRoomConnectAsync(room).Forget();
-                        return;
-                    }
-
-                    _ownedWaitingRoom = room;
-                    _lobbyView.ShowWaitingRoom(room);
-                    await UniTask.Delay(interval, cancellationToken: ct).SuppressCancellationThrow();
-                    if (ct.IsCancellationRequested)
-                        return;
+                    case BoothDialOutcome.Ringing:
+                        _currentPendingCall = result.Call;
+                        _lobbyView.ShowOutgoingRinging(_boothFlow.BoothNumber, normalizedNumber);
+                        break;
+                    case BoothDialOutcome.NotRegistered:
+                        _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Number is not registered");
+                        break;
+                    case BoothDialOutcome.Offline:
+                        _lobbyView.ShowIdle(_boothFlow.BoothNumber, "User is offline");
+                        break;
+                    case BoothDialOutcome.Busy:
+                        _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Line is busy");
+                        break;
+                    default:
+                        _statusView.ShowError($"Dial failed: {result.Error}");
+                        _lobbyView.ShowIdle(_boothFlow.BoothNumber);
+                        break;
                 }
             }
             catch (OperationCanceledException)
@@ -226,91 +132,66 @@ namespace WebRtcV2.Presentation
             }
             catch (Exception e)
             {
-                _statusView.ShowError($"Waiting room failed: {e.Message}");
-                await RequestBootstrapAsync(_appToken);
+                _statusView.ShowError($"Dial failed: {e.Message}");
+                _lobbyView.ShowIdle(_boothFlow.BoothNumber);
+            }
+            finally
+            {
+                _isTransitioning = false;
+                _lobbyView.SetBusy(false);
             }
         }
 
-        private async void HandleRoomSelected(RoomModel room)
+        private async void HandleAcceptRequested()
         {
-            if (_isTransitioning || room == null) return;
+            if (_disposed || _isTransitioning || _currentPendingCall == null) return;
             _isTransitioning = true;
             _statusView.ClearError();
-            _lobbyView.SetLoading(true);
-            StopLobbyLoops(disconnectSocket: true);
 
             try
             {
-                var result = await _roomFlow.JoinRoomAsync(room, _appToken);
-                if (!result.Success)
+                var acceptedCall = await _boothFlow.AcceptAsync(_currentPendingCall.CallId, _appToken);
+                if (acceptedCall == null)
                 {
-                    _statusView.ShowError($"Join failed: {result.Error}");
-                    await RequestBootstrapAsync(_appToken);
+                    _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Could not accept the call");
                     return;
                 }
 
-                _roomControlSocket.ConnectToRoom(result.SessionId, _roomFlow.LocalClientId, _appToken);
-                _showCall?.Invoke();
-                _connectionFlow.ConnectAsCalleeAsync(result.SessionId, result.CallerPeerId, _appToken).Forget();
+                StartCall(acceptedCall);
             }
             catch (OperationCanceledException)
             {
             }
             catch (Exception e)
             {
-                _statusView.ShowError($"Join failed: {e.Message}");
-                await RequestBootstrapAsync(_appToken);
+                _statusView.ShowError($"Accept failed: {e.Message}");
+                _lobbyView.ShowIdle(_boothFlow.BoothNumber);
             }
             finally
             {
                 _isTransitioning = false;
-                _lobbyView.SetLoading(false);
             }
         }
 
-        private void HandleRoomControlEvent(RoomControlEvent controlEvent)
+        private async void HandleRejectRequested()
         {
-            if (_disposed || controlEvent == null || _ownedWaitingRoom == null)
-                return;
-            if (!string.Equals(controlEvent.sessionId, _ownedWaitingRoom.SessionId, StringComparison.Ordinal))
-                return;
-
-            switch (controlEvent.type)
-            {
-                case RoomControlEvent.Types.PeerJoined:
-                    BeginOwnedRoomConnectAsync(_ownedWaitingRoom).Forget();
-                    break;
-                case RoomControlEvent.Types.RoomState when string.Equals(controlEvent.roomStatus, "joined", StringComparison.OrdinalIgnoreCase):
-                    BeginOwnedRoomConnectAsync(_ownedWaitingRoom).Forget();
-                    break;
-                case RoomControlEvent.Types.RoomClosed:
-                    _statusView.ShowError("Комната ожидания закрылась. Создаем заново...");
-                    RequestBootstrapAsync(_appToken).Forget();
-                    break;
-            }
-        }
-
-        private async UniTaskVoid BeginOwnedRoomConnectAsync(RoomModel room)
-        {
-            if (_disposed || _isTransitioning || room == null || _ownedWaitingRoom == null)
-                return;
-            if (!string.Equals(room.SessionId, _ownedWaitingRoom.SessionId, StringComparison.Ordinal))
-                return;
-
+            if (_disposed || _isTransitioning || _currentPendingCall == null) return;
             _isTransitioning = true;
+            _statusView.ClearError();
+
             try
             {
-                _notificationService.NotifyPeerJoined(room.SessionId, room.DisplayName);
-                _heartbeatService.Stop();
-                StopLobbyTokenOnly();
-                _ownedWaitingRoom = room;
-                _showCall?.Invoke();
-                _connectionFlow.ConnectAsCallerAsync(room.SessionId, _appToken).Forget();
+                await _boothFlow.RejectAsync(_currentPendingCall.CallId, _appToken);
+                _currentPendingCall = null;
+                _lobbyView.ShowIdle(_boothFlow.BoothNumber);
+            }
+            catch (OperationCanceledException)
+            {
             }
             catch (Exception e)
             {
-                _statusView.ShowError($"Waiting room connect failed: {e.Message}");
-                await RequestBootstrapAsync(_appToken);
+                _statusView.ShowError($"Reject failed: {e.Message}");
+                _lobbyView.ShowIdle(_boothFlow.BoothNumber);
             }
             finally
             {
@@ -318,20 +199,108 @@ namespace WebRtcV2.Presentation
             }
         }
 
-        private void StopLobbyLoops(bool disconnectSocket)
+        private void HandleBoothSnapshotChanged(BoothSnapshot snapshot)
         {
-            _ownedWaitingRoom = null;
-            _heartbeatService.Stop();
-            StopLobbyTokenOnly();
-            if (disconnectSocket)
-                _roomControlSocket.Disconnect();
+            if (_disposed) return;
+            RenderSnapshot(snapshot, null);
+            TryStartCallFromSnapshot(snapshot);
         }
 
-        private void StopLobbyTokenOnly()
+        private void HandleIncomingCall(CallSessionRef call)
         {
-            _lobbyCts?.Cancel();
-            _lobbyCts?.Dispose();
-            _lobbyCts = null;
+            if (_disposed || call == null) return;
+            _currentPendingCall = call;
+            _notificationService.NotifyIncomingCall(call.CallId, call.CallerNumber);
+            RenderSnapshot(_boothFlow.CurrentSnapshot, null);
+        }
+
+        private void HandleCallAccepted(CallSessionRef call)
+        {
+            if (_disposed || call == null || !call.IsLocalCaller) return;
+            StartCall(call);
+        }
+
+        private void HandleCallEnded(string callId)
+        {
+            if (string.IsNullOrWhiteSpace(callId)) return;
+            if (string.Equals(_startedCallId, callId, StringComparison.Ordinal))
+                _startedCallId = null;
+            if (_currentPendingCall != null && string.Equals(_currentPendingCall.CallId, callId, StringComparison.Ordinal))
+                _currentPendingCall = null;
+
+            RenderSnapshot(_boothFlow.CurrentSnapshot, null);
+        }
+
+        private void StartCall(CallSessionRef call)
+        {
+            if (call == null)
+                return;
+            if (string.Equals(_startedCallId, call.CallId, StringComparison.Ordinal))
+                return;
+
+            _startedCallId = call.CallId;
+            _currentPendingCall = call;
+            string peerNumber = call.IsLocalCaller ? call.CalleeNumber : call.CallerNumber;
+            _lobbyView.ShowConnecting(_boothFlow.BoothNumber, peerNumber);
+            _showCall?.Invoke();
+
+            if (call.IsLocalCaller)
+                _connectionFlow.ConnectAsCallerAsync(call.CallId, _appToken).Forget();
+            else
+                _connectionFlow.ConnectAsCalleeAsync(call.CallId, call.CallerClientId, _appToken).Forget();
+        }
+
+        private void TryStartCallFromSnapshot(BoothSnapshot snapshot)
+        {
+            if (_disposed || snapshot?.Call == null)
+                return;
+            if (snapshot.LineState != BoothLineState.Connecting)
+                return;
+
+            StartCall(snapshot.Call);
+        }
+
+        private static string NormalizeDialNumber(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            char[] buffer = new char[12];
+            int count = 0;
+            foreach (char c in raw)
+            {
+                if (!char.IsDigit(c))
+                    continue;
+                if (count >= buffer.Length)
+                    return null;
+                buffer[count++] = c;
+            }
+
+            return count == 12 ? new string(buffer, 0, count) : null;
+        }
+
+        private void RenderSnapshot(BoothSnapshot snapshot, string message)
+        {
+            snapshot ??= BoothSnapshot.Empty;
+            _currentPendingCall = snapshot.Call;
+
+            switch (snapshot.LineState)
+            {
+                case BoothLineState.RingingIncoming:
+                    _lobbyView.ShowIncomingCall(snapshot.BoothNumber, snapshot.Call?.CallerNumber ?? snapshot.PeerNumber);
+                    break;
+                case BoothLineState.RingingOutgoing:
+                    _lobbyView.ShowOutgoingRinging(snapshot.BoothNumber, snapshot.Call?.CalleeNumber ?? snapshot.PeerNumber);
+                    break;
+                case BoothLineState.Connecting:
+                case BoothLineState.InCall:
+                    _lobbyView.ShowConnecting(snapshot.BoothNumber, snapshot.PeerNumber ?? snapshot.Call?.CallerNumber ?? snapshot.Call?.CalleeNumber);
+                    break;
+                case BoothLineState.Idle:
+                default:
+                    _lobbyView.ShowIdle(snapshot.BoothNumber, message);
+                    break;
+            }
         }
     }
 }

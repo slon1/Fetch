@@ -2,8 +2,8 @@ using System;
 using System.Threading;
 using Unity.WebRTC;
 using UnityEngine;
+using WebRtcV2.Application.Booth;
 using WebRtcV2.Application.Connection;
-using WebRtcV2.Application.Room;
 using WebRtcV2.Config;
 using WebRtcV2.CrashHandling;
 using CrashReportModel = WebRtcV2.CrashHandling.CrashReport;
@@ -13,11 +13,6 @@ using WebRtcV2.Transport;
 
 namespace WebRtcV2.Bootstrap
 {
-    /// <summary>
-    /// Composition root for Game.unity.
-    /// Builds services, owns app lifetime, and delegates scene UI orchestration
-    /// to <see cref="AppUiCoordinator"/>.
-    /// </summary>
     public class AppBootstrap : MonoBehaviour
     {
         [Header("Config")]
@@ -36,9 +31,8 @@ namespace WebRtcV2.Bootstrap
         private ISecretsProvider _secretsProvider;
         private ConnectionDiagnostics _diagnostics;
         private MediaCaptureService _mediaCapture;
-        private IRoomFlow _roomFlow;
-        private RoomHeartbeatService _heartbeatService;
-        private RoomControlSocketService _roomControlSocketService;
+        private IBoothFlow _boothFlow;
+        private BoothSocketService _boothSocketService;
         private IConnectionFlow _connectionFlow;
         private AppUiCoordinator _uiCoordinator;
         private AppVisibilityTracker _visibilityTracker;
@@ -104,7 +98,7 @@ namespace WebRtcV2.Bootstrap
 
         private void Update()
         {
-            _roomControlSocketService?.DispatchMessageQueue();
+            _boothSocketService?.DispatchMessageQueue();
 
             if (_crashCoordinator != null && _crashCoordinator.TryConsumePendingFatal(out CrashReportModel report))
                 EnterFatalState(report);
@@ -138,16 +132,13 @@ namespace WebRtcV2.Bootstrap
             _workerClient = new WorkerClient(config);
             _secretsProvider = new DevSecretsProvider();
             _mediaCapture = new MediaCaptureService(transform, _diagnostics);
+            _boothSocketService = new BoothSocketService(config, _diagnostics);
 
-            _roomFlow = new RoomFlowCoordinator(
+            _boothFlow = new BoothFlowCoordinator(
                 _workerClient,
-                config,
+                _boothSocketService,
                 _diagnostics,
-                identity.ClientId,
-                identity.DisplayName);
-
-            _heartbeatService = new RoomHeartbeatService(_roomFlow, config, _diagnostics);
-            _roomControlSocketService = new RoomControlSocketService(config, _diagnostics);
+                identity);
 
             _connectionFlow = new ConnectionFlowCoordinator(
                 _workerClient,
@@ -155,23 +146,20 @@ namespace WebRtcV2.Bootstrap
                 _secretsProvider,
                 _diagnostics,
                 _mediaCapture,
-                _roomControlSocketService,
+                _boothSocketService,
                 identity.ClientId);
         }
 
         private void BuildUiCoordinator()
         {
             _uiCoordinator = new AppUiCoordinator(
-                config,
                 lobbyView,
                 callView,
                 statusView,
                 remoteAudioSource,
                 _mediaCapture,
-                _roomFlow,
+                _boothFlow,
                 _connectionFlow,
-                _heartbeatService,
-                _roomControlSocketService,
                 _notificationService,
                 _appCts.Token);
         }
@@ -193,16 +181,16 @@ namespace WebRtcV2.Bootstrap
             SafeRun(() => _appCts?.Cancel());
             SafeRun(() => _uiCoordinator?.Dispose());
             SafeRun(() => (_connectionFlow as IDisposable)?.Dispose());
-            SafeRun(() => _heartbeatService?.Dispose());
-            SafeRun(() => _roomControlSocketService?.Dispose());
+            SafeRun(() => (_boothFlow as IDisposable)?.Dispose());
+            SafeRun(() => _boothSocketService?.Dispose());
             SafeRun(() => _notificationService?.Dispose());
             SafeRun(() => _mediaCapture?.Dispose());
             SafeRun(() => _appCts?.Dispose());
 
             _uiCoordinator = null;
             _connectionFlow = null;
-            _heartbeatService = null;
-            _roomControlSocketService = null;
+            _boothFlow = null;
+            _boothSocketService = null;
             _notificationService = null;
             _mediaCapture = null;
             _appCts = null;

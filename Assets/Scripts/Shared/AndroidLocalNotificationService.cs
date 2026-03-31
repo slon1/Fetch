@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 #if UNITY_ANDROID
 using Unity.Notifications.Android;
@@ -6,10 +6,6 @@ using Unity.Notifications.Android;
 
 namespace WebRtcV2.Shared
 {
-    /// <summary>
-    /// Android-only best-effort local notifications for background lobby/call events.
-    /// No-op on non-Android platforms.
-    /// </summary>
     public sealed class AndroidLocalNotificationService : IDisposable
     {
         private readonly AppVisibilityTracker _visibility;
@@ -35,18 +31,18 @@ namespace WebRtcV2.Shared
 #endif
         }
 
-        public void NotifyPeerJoined(string sessionId, string roomName)
+        public void NotifyIncomingCall(string callId, string callerNumber)
         {
-            Send(sessionId,
-                title: "Собеседник вошел",
-                text: $"{SafeRoomName(roomName)}. Идет подключение...");
+            Send(callId,
+                title: "Входящий звонок",
+                text: $"Номер {SafePeer(callerNumber)} звонит вам.");
         }
 
-        public void NotifyConnected(string sessionId, string roomName)
+        public void NotifyConnected(string callId, string peerDisplay)
         {
-            Send(sessionId,
+            Send(callId,
                 title: "Связь установлена",
-                text: $"{SafeRoomName(roomName)}. Вас ждут у телефона.");
+                text: $"{SafePeer(peerDisplay)}. Вас ждут у телефона.");
         }
 
         public void CancelSessionNotification(string sessionId)
@@ -64,8 +60,8 @@ namespace WebRtcV2.Shared
 #endif
         }
 
-        private string SafeRoomName(string roomName) =>
-            string.IsNullOrWhiteSpace(roomName) ? "Комната готова" : roomName.Trim();
+        private static string SafePeer(string value) =>
+            string.IsNullOrWhiteSpace(value) ? "собеседник" : value.Trim();
 
         private void Send(string sessionId, string title, string text)
         {
@@ -111,7 +107,7 @@ namespace WebRtcV2.Shared
                 Id = ChannelId,
                 Name = ChannelName,
                 Importance = Importance.High,
-                Description = "Room join and connection events"
+                Description = "Incoming call and connection events"
             };
             AndroidNotificationCenter.RegisterNotificationChannel(channel);
         }

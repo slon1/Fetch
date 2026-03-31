@@ -9,38 +9,34 @@ using WebRtcV2.Shared;
 
 namespace WebRtcV2.Transport
 {
-    /// <summary>
-    /// Maintains a single control WebSocket to the Durable Object room endpoint.
-    /// Used for low-latency room events while leaving SDP payload transport on HTTP.
-    /// </summary>
-    public sealed class RoomControlSocketService : IDisposable
+    public sealed class BoothSocketService : IDisposable
     {
         private readonly AppConfig _config;
         private readonly ConnectionDiagnostics _diagnostics;
 
         private CancellationTokenSource _socketCts;
         private WebSocket _socket;
-        private string _sessionId;
+        private string _boothNumber;
         private string _clientId;
         private bool _disposed;
 
-        public string ActiveSessionId => _sessionId;
+        public string ActiveBoothNumber => _boothNumber;
         public bool IsConnected => _socket != null && _socket.State == WebSocketState.Open;
 
-        public event Action<RoomControlEvent> OnEvent;
+        public event Action<BoothSocketEvent> OnEvent;
 
-        public RoomControlSocketService(AppConfig config, ConnectionDiagnostics diagnostics)
+        public BoothSocketService(AppConfig config, ConnectionDiagnostics diagnostics)
         {
             _config = config;
             _diagnostics = diagnostics;
         }
 
-        public void ConnectToRoom(string sessionId, string clientId, CancellationToken parentToken)
+        public void Connect(string boothNumber, string clientId, CancellationToken parentToken)
         {
-            if (_disposed || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(clientId))
+            if (_disposed || string.IsNullOrWhiteSpace(boothNumber) || string.IsNullOrWhiteSpace(clientId))
                 return;
 
-            if (string.Equals(_sessionId, sessionId, StringComparison.Ordinal) &&
+            if (string.Equals(_boothNumber, boothNumber, StringComparison.Ordinal) &&
                 string.Equals(_clientId, clientId, StringComparison.Ordinal) &&
                 _socketCts != null)
             {
@@ -48,11 +44,10 @@ namespace WebRtcV2.Transport
             }
 
             Disconnect();
-
-            _sessionId = sessionId;
+            _boothNumber = boothNumber;
             _clientId = clientId;
             _socketCts = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
-            RunConnectLoopAsync(sessionId, clientId, _socketCts.Token).Forget();
+            RunConnectLoopAsync(boothNumber, clientId, _socketCts.Token).Forget();
         }
 
         public void Disconnect()
@@ -63,7 +58,7 @@ namespace WebRtcV2.Transport
 
             WebSocket socket = _socket;
             _socket = null;
-            _sessionId = null;
+            _boothNumber = null;
             _clientId = null;
 
             if (socket != null)
@@ -84,31 +79,29 @@ namespace WebRtcV2.Transport
             Disconnect();
         }
 
-        private async UniTaskVoid RunConnectLoopAsync(string sessionId, string clientId, CancellationToken ct)
+        private async UniTaskVoid RunConnectLoopAsync(string boothNumber, string clientId, CancellationToken ct)
         {
-            TimeSpan reconnectDelay = TimeSpan.FromSeconds(
-                Math.Max(1f, _config.workerEndpoint.roomControlSocketReconnectDelaySec));
+            TimeSpan reconnectDelay = TimeSpan.FromSeconds(Math.Max(1f, _config.workerEndpoint.roomControlSocketReconnectDelaySec));
 
-            while (!ct.IsCancellationRequested && Matches(sessionId, clientId))
+            while (!ct.IsCancellationRequested && Matches(boothNumber, clientId))
             {
                 WebSocket socket = null;
                 bool closed = false;
 
                 try
                 {
-                    socket = new WebSocket(BuildRoomEventsUrl(sessionId, clientId));
-                    socket.OnOpen += () => _diagnostics.LogInfo("RoomSocket", $"Connected session={sessionId}");
-                    socket.OnError += error => _diagnostics.LogWarning("RoomSocket", $"Error session={sessionId}: {error}");
+                    socket = new WebSocket(BuildBoothEventsUrl(boothNumber, clientId));
+                    socket.OnOpen += () => _diagnostics.LogInfo("BoothSocket", $"Connected booth={boothNumber}");
+                    socket.OnError += error => _diagnostics.LogWarning("BoothSocket", $"Error booth={boothNumber}: {error}");
                     socket.OnClose += code =>
                     {
                         closed = true;
-                        _diagnostics.LogInfo("RoomSocket", $"Closed session={sessionId} code={code}");
+                        _diagnostics.LogInfo("BoothSocket", $"Closed booth={boothNumber} code={code}");
                     };
                     socket.OnMessage += bytes => HandleSocketMessage(bytes);
 
                     _socket = socket;
                     await socket.Connect();
-
                     await UniTask.WaitUntil(
                             () => ct.IsCancellationRequested || closed || socket.State != WebSocketState.Open,
                             cancellationToken: ct)
@@ -120,7 +113,7 @@ namespace WebRtcV2.Transport
                 catch (Exception e)
                 {
                     if (!ct.IsCancellationRequested)
-                        _diagnostics.LogWarning("RoomSocket", $"Connect loop error session={sessionId}: {e.Message}");
+                        _diagnostics.LogWarning("BoothSocket", $"Connect loop error booth={boothNumber}: {e.Message}");
                 }
                 finally
                 {
@@ -131,7 +124,7 @@ namespace WebRtcV2.Transport
                         await CloseSocketSafeAsync(socket);
                 }
 
-                if (ct.IsCancellationRequested || !Matches(sessionId, clientId))
+                if (ct.IsCancellationRequested || !Matches(boothNumber, clientId))
                     return;
 
                 await UniTask.Delay(reconnectDelay, cancellationToken: ct).SuppressCancellationThrow();
@@ -143,7 +136,7 @@ namespace WebRtcV2.Transport
             try
             {
                 string json = Encoding.UTF8.GetString(bytes);
-                var controlEvent = JsonUtility.FromJson<RoomControlEvent>(json);
+                var controlEvent = JsonUtility.FromJson<BoothSocketEvent>(json);
                 if (controlEvent == null || string.IsNullOrWhiteSpace(controlEvent.type))
                     return;
 
@@ -151,11 +144,11 @@ namespace WebRtcV2.Transport
             }
             catch (Exception e)
             {
-                _diagnostics.LogWarning("RoomSocket", $"Message parse error: {e.Message}");
+                _diagnostics.LogWarning("BoothSocket", $"Message parse error: {e.Message}");
             }
         }
 
-        private string BuildRoomEventsUrl(string sessionId, string clientId)
+        private string BuildBoothEventsUrl(string boothNumber, string clientId)
         {
             string baseUrl = _config.workerEndpoint.baseUrl.TrimEnd('/');
             if (baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
@@ -163,11 +156,11 @@ namespace WebRtcV2.Transport
             else if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
                 baseUrl = "ws://" + baseUrl.Substring("http://".Length);
 
-            return $"{baseUrl}/api/rooms/{Uri.EscapeDataString(sessionId)}/events?clientId={Uri.EscapeDataString(clientId)}";
+            return $"{baseUrl}/api/booths/{Uri.EscapeDataString(boothNumber)}/events?clientId={Uri.EscapeDataString(clientId)}";
         }
 
-        private bool Matches(string sessionId, string clientId) =>
-            string.Equals(_sessionId, sessionId, StringComparison.Ordinal) &&
+        private bool Matches(string boothNumber, string clientId) =>
+            string.Equals(_boothNumber, boothNumber, StringComparison.Ordinal) &&
             string.Equals(_clientId, clientId, StringComparison.Ordinal);
 
         private static async UniTask CloseSocketSafeAsync(WebSocket socket)

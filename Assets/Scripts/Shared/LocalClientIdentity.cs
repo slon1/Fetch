@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
@@ -6,22 +7,29 @@ using UnityEngine;
 namespace WebRtcV2.Shared
 {
     /// <summary>
-    /// Stable per-install identity used for room ownership and auto room naming.
-    /// Prefers a hashed device identifier and falls back to a persisted generated id.
+    /// Stable per-install identity used for ownership and human-facing booth number assignment.
+    /// ClientId is stable and internal; booth number is stable after first successful registration.
     /// </summary>
     public sealed class LocalClientIdentity
     {
-        private const string PlayerPrefsKey = "WebRtcV2.ClientId";
+        private const string ClientIdPrefsKey = "WebRtcV2.ClientId";
+        private const string BoothNumberPrefsKey = "WebRtcV2.BoothNumber";
+        private const string BoothAttemptPrefsKey = "WebRtcV2.BoothAttempt";
+        private const ulong BoothModulo = 1_000_000_000_000UL;
 
         public string ClientId { get; }
         public string DisplayName { get; }
         public string ShortSuffix { get; }
+        public string BoothNumber { get; }
+        public int BoothAttempt { get; }
 
-        private LocalClientIdentity(string clientId, string displayName, string shortSuffix)
+        private LocalClientIdentity(string clientId, string displayName, string shortSuffix, string boothNumber, int boothAttempt)
         {
             ClientId = clientId;
             DisplayName = displayName;
             ShortSuffix = shortSuffix;
+            BoothNumber = boothNumber;
+            BoothAttempt = boothAttempt;
         }
 
         public static LocalClientIdentity Load(int maxDisplayNameLength)
@@ -33,7 +41,27 @@ namespace WebRtcV2.Shared
             if (displayName.Length > maxDisplayNameLength)
                 displayName = displayName.Substring(0, maxDisplayNameLength);
 
-            return new LocalClientIdentity(clientId, displayName, shortSuffix);
+            string storedBoothNumber = PlayerPrefs.GetString(BoothNumberPrefsKey, string.Empty);
+            int boothAttempt = Mathf.Max(0, PlayerPrefs.GetInt(BoothAttemptPrefsKey, 0));
+            return new LocalClientIdentity(clientId, displayName, shortSuffix, storedBoothNumber, boothAttempt);
+        }
+
+        public string GetBoothNumberCandidate(int attempt)
+        {
+            using var sha = SHA256.Create();
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes($"{ClientId}:{attempt.ToString(CultureInfo.InvariantCulture)}"));
+            ulong value = BitConverter.ToUInt64(hash, 0) % BoothModulo;
+            return value.ToString("D12", CultureInfo.InvariantCulture);
+        }
+
+        public void PersistBoothNumber(string boothNumber, int attempt)
+        {
+            if (string.IsNullOrWhiteSpace(boothNumber))
+                return;
+
+            PlayerPrefs.SetString(BoothNumberPrefsKey, boothNumber.Trim());
+            PlayerPrefs.SetInt(BoothAttemptPrefsKey, Mathf.Max(0, attempt));
+            PlayerPrefs.Save();
         }
 
         private static string ResolveClientId()
@@ -45,12 +73,12 @@ namespace WebRtcV2.Shared
                 return ComputeSha256Hex(source);
             }
 
-            string stored = PlayerPrefs.GetString(PlayerPrefsKey, string.Empty);
+            string stored = PlayerPrefs.GetString(ClientIdPrefsKey, string.Empty);
             if (!string.IsNullOrWhiteSpace(stored))
                 return stored;
 
             stored = Guid.NewGuid().ToString("N");
-            PlayerPrefs.SetString(PlayerPrefsKey, stored);
+            PlayerPrefs.SetString(ClientIdPrefsKey, stored);
             PlayerPrefs.Save();
             return stored;
         }

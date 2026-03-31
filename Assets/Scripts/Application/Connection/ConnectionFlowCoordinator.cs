@@ -11,28 +11,14 @@ using WebRtcV2.Transport;
 
 namespace WebRtcV2.Application.Connection {
     /// <summary>
-    /// Main use-case orchestrator for the WebRTC session lifecycle.
+    /// Main WebRTC session orchestrator.
     ///
-    /// Architecture note (post-migration):
-    ///   - <see cref="ConnectionStateMachine"/> tracks lifecycle only (IdleРІвЂ вЂ™PreparingРІвЂ вЂ™РІР‚В¦РІвЂ вЂ™Closed).
-    ///   - <see cref="ConnectionSession"/> holds the full runtime model: lifecycle, mode, route,
-    ///     signaling strategy, reconnect counter, last error, and DataChannel state.
-    ///   - <see cref="ConnectionSnapshot"/> is the immutable read model published to UI/Bootstrap.
-    ///   - <see cref="OnSnapshotChanged"/> is the primary event. <see cref="OnStateChanged"/>
-    ///     is a compatibility shim that maps snapshot РІвЂ вЂ™ old <see cref="ConnectionState"/> enum.
-    ///
-    /// Invariant (event ordering):
-    ///   SetLifecycle() fires OnSnapshotChanged BEFORE CleanupSession() clears SessionId.
-    ///   This ensures that when AppBootstrap receives Closed/Failed, snapshot.SessionId and
-    ///   snapshot.IsCreator are still populated and can be used directly.
-    ///
-    /// Non-trickle ICE (MVP):
-    ///   All ICE candidates are gathered before SDP is posted to the Worker.
-    ///   LocalSdp is only read after WaitForIceGatheringAsync returns.
-    ///
-    /// Recovery (MVP):
-    ///   On ICE failure the coordinator transitions to Recovering for a brief delay,
-    ///   then falls back to Failed. ICE restart is Stage 5.
+    /// Notes:
+    /// - Lifecycle is tracked through ConnectionStateMachine and mirrored into ConnectionSession.
+    /// - ConnectionSnapshot is the immutable model published to UI and bootstrap.
+    /// - Offer and answer payloads remain HTTP-polled signaling slots keyed by callId.
+    /// - BoothSocketService is used only for low-latency control events such as remote hangup.
+    /// - Recovery remains ICE-first: disconnected grace period, retry budget and ICE restart.
     /// </summary>
     public class ConnectionFlowCoordinator : IConnectionFlow, IDisposable {
         private readonly WorkerClient _worker;
@@ -40,12 +26,10 @@ namespace WebRtcV2.Application.Connection {
         private readonly ISecretsProvider _secrets;
         private readonly ConnectionDiagnostics _diagnostics;
         private readonly MediaCaptureService _mediaCapture;
-        private readonly RoomControlSocketService _roomControlSocket;
+        private readonly BoothSocketService _boothSocket;
         private readonly ConnectionStateMachine _fsm;
         private readonly QualityMonitor _qualityMonitor;
         private readonly string _localPeerId;
-
-        // РІвЂќР‚РІвЂќР‚ Session runtime state РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         private readonly ConnectionSession _session = new ConnectionSession();
 
@@ -58,22 +42,18 @@ namespace WebRtcV2.Application.Connection {
 
         private CancellationTokenSource _sessionCts;
 
-        // РІвЂќР‚РІвЂќР‚ Quality sampling & policy РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
-
         private WebRtcStatsSampler _statsSampler;
         private readonly ConnectionPolicy _policy;
         private readonly RecoveryCoordinator _recovery;
         private bool _iceRestartInProgress;
 
-        // РІвЂќР‚РІвЂќР‚ IConnectionFlow РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
-
         public ConnectionSnapshot CurrentSnapshot => _session.ToSnapshot();
 
-        /// <summary>Primary event РІР‚вЂќ fired on every state or mode change.</summary>
+        /// <summary>Primary event  fired on every state or mode change.</summary>
         public event Action<ConnectionSnapshot> OnSnapshotChanged;
 
         /// <summary>
-        /// Compatibility shim. Maps snapshot РІвЂ вЂ™ old ConnectionState for code that has
+        /// Compatibility shim. Maps snapshot  old ConnectionState for code that has
         /// not yet migrated to <see cref="OnSnapshotChanged"/>.
         /// Will be removed once AppBootstrap and all consumers use snapshot API.
         /// </summary>
@@ -87,22 +67,20 @@ namespace WebRtcV2.Application.Connection {
         // Kept for IConnectionFlow.CurrentState compatibility; derived from snapshot.
         public ConnectionState CurrentState => CompatState(_session.ToSnapshot());
 
-        // РІвЂќР‚РІвЂќР‚ Constructor РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
-
         public ConnectionFlowCoordinator(
             WorkerClient worker,
             AppConfig config,
             ISecretsProvider secrets,
             ConnectionDiagnostics diagnostics,
             MediaCaptureService mediaCapture,
-            RoomControlSocketService roomControlSocket,
+            BoothSocketService boothSocket,
             string localPeerId) {
             _worker = worker;
             _config = config;
             _secrets = secrets;
             _diagnostics = diagnostics;
             _mediaCapture = mediaCapture;
-            _roomControlSocket = roomControlSocket;
+            _boothSocket = boothSocket;
             _localPeerId = localPeerId;
 
             _fsm = new ConnectionStateMachine(diagnostics);
@@ -110,13 +88,11 @@ namespace WebRtcV2.Application.Connection {
 
             _qualityMonitor = new QualityMonitor();
             _qualityMonitor.OnSignalChanged += HandleQualitySignal;
-            _roomControlSocket.OnEvent += HandleRoomControlEvent;
+            _boothSocket.OnEvent += HandleBoothSocketEvent;
 
             _policy = new ConnectionPolicy(config, diagnostics);
             _recovery = new RecoveryCoordinator(config, diagnostics);
         }
-
-        // РІвЂќР‚РІвЂќР‚ Connect flows РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         public async UniTask ConnectAsCallerAsync(string sessionId, CancellationToken ct = default) {
             bool useRelayThisAttempt = ConsumeRelayPreferenceForNewAttempt();
@@ -141,7 +117,7 @@ namespace WebRtcV2.Application.Connection {
                 // Step 1: create offer + set local description (starts ICE gathering).
                 await _peer.CreateOfferAsync(_sessionCts.Token);
 
-                // Step 2: wait for all ICE candidates РІР‚вЂќ non-trickle ICE (MVP).
+                // Step 2: wait for all ICE candidates  non-trickle ICE (MVP).
                 await _peer.WaitForIceGatheringAsync(
                     _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, GetEffectiveRelayOnly());
 
@@ -193,7 +169,7 @@ namespace WebRtcV2.Application.Connection {
         }
 
         /// <param name="callerPeerId">
-        /// PeerId of the room creator. Used to validate the received offer actually
+        /// ClientId of the caller booth owner. Used to validate the received offer
         /// comes from the expected peer and not a stale or misrouted message.
         /// </param>
         public async UniTask ConnectAsCalleeAsync(
@@ -243,7 +219,7 @@ namespace WebRtcV2.Application.Connection {
                 // Step 1: create answer + set local description (starts ICE gathering).
                 await _peer.CreateAnswerAsync(_sessionCts.Token);
 
-                // Step 2: wait for all ICE candidates РІР‚вЂќ non-trickle ICE (MVP).
+                // Step 2: wait for all ICE candidates  non-trickle ICE (MVP).
                 await _peer.WaitForIceGatheringAsync(
                     _config.connection.iceGatheringTimeoutMs, _sessionCts.Token, GetEffectiveRelayOnly());
 
@@ -298,7 +274,7 @@ namespace WebRtcV2.Application.Connection {
             }
 
             // Fire event BEFORE CleanupSession so the snapshot carries
-            // SessionId and IsCreator РІР‚вЂќ Bootstrap uses them for room deletion.
+            // SessionId and IsCreator are still present in the published snapshot.
             SetLifecycle(ConnectionLifecycleState.Closed, "local-hangup");
             CleanupSession();
         }
@@ -323,8 +299,6 @@ namespace WebRtcV2.Application.Connection {
 
         public void SetVideoEnabled(bool enabled) => _mediaCapture.SetVideoEnabled(enabled);
 
-        // РІвЂќР‚РІвЂќР‚ Private: FSM / session sync РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
-
         /// <summary>
         /// Transitions the FSM and synchronises session.LifecycleState.
         /// Records error in session when transitioning to Failed.
@@ -343,9 +317,9 @@ namespace WebRtcV2.Application.Connection {
         ///
         /// Invariant preserved: SetLifecycle publishes OnSnapshotChanged synchronously
         /// BEFORE CleanupSession resets the session, so AppBootstrap can use
-        /// snapshot.SessionId and snapshot.IsCreator for room deletion.
+        /// snapshot.SessionId and snapshot.IsCreator if needed.
         ///
-        /// Safe if the session is already terminal РІР‚вЂќ SetLifecycle is a no-op for
+        /// Safe if the session is already terminal  SetLifecycle is a no-op for
         /// invalid FSM transitions and CleanupSession is idempotent (null-checks throughout).
         ///
         /// Use this for any Failed path that is NOT already inside a catch block
@@ -383,8 +357,6 @@ namespace WebRtcV2.Application.Connection {
             ConnectionLifecycleState.Closed => ConnectionState.Closed,
             _ => ConnectionState.Idle,
         };
-
-        // РІвЂќР‚РІвЂќР‚ Private: setup РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         private async UniTask SetupPeerAsync(CancellationToken ct) {
             var turnCredentials = await _secrets.GetTurnCredentialsAsync(ct);
@@ -428,8 +400,6 @@ namespace WebRtcV2.Application.Connection {
                     : RTCIceTransportPolicy.All
             };
         }
-
-        // РІвЂќР‚РІвЂќР‚ Private: ICE / track events РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         private void HandleRemoteTrack(RTCTrackEvent e) {
             if (e.Track is AudioStreamTrack audioTrack) {
@@ -527,7 +497,7 @@ namespace WebRtcV2.Application.Connection {
         private void HandleQualitySignal(QualityMonitor.Signal signal) {
             _diagnostics.LogInfo("Quality", signal.ToString());
             // ICE-state-based signals are logged only; real quality decisions
-            // are driven by WebRtcStatsSampler РІвЂ вЂ™ ConnectionPolicy (see below).
+            // are driven by WebRtcStatsSampler  ConnectionPolicy (see below).
         }
 
         private void StartQualitySampling(CancellationToken ct) {
@@ -542,24 +512,24 @@ namespace WebRtcV2.Application.Connection {
             var decision = _policy.Evaluate(_session.ToSnapshot(), quality);
 
             if (decision == ConnectionPolicyDecision.DowngradeToDataOnly) {
-                _diagnostics.LogWarning("Policy", $"Decision=DowngradeToDataOnly РІР‚вЂќ switching to logical DataOnly mode");
+                _diagnostics.LogWarning("Policy", $"Decision=DowngradeToDataOnly  switching to logical DataOnly mode");
                 ApplyDataOnlyMode();
             }
         }
 
         /// <summary>
-        /// Pragmatic MVP downgrade: AudioOnly РІвЂ вЂ™ DataOnly.
+        /// Pragmatic MVP downgrade: AudioOnly  DataOnly.
         ///
-        /// IMPLEMENTATION NOTE РІР‚вЂќ this is NOT a true data-only transport:
+        /// IMPLEMENTATION NOTE  this is NOT a true data-only transport:
         ///   True data-only would require: _peer.RemoveTrack(sender) + renegotiation (offer/answer).
         ///   That is complex in Unity WebRTC and risks breaking the session mid-call.
         ///
         /// What we do instead ("logical DataOnly mode"):
-        ///   1. AudioStreamTrack.Enabled = false  РІР‚вЂќ stops the WebRTC stack from encoding
+        ///   1. AudioStreamTrack.Enabled = false   stops the WebRTC stack from encoding
         ///      and transmitting audio frames. The track remains in the peer connection.
-        ///   2. AudioSource.mute = true            РІР‚вЂќ belt-and-suspenders: silences local mic.
-        ///   3. SessionModel.MediaMode = DataOnly  РІР‚вЂќ truthful session state.
-        ///   4. RaiseSnapshotChanged()             РІР‚вЂќ UI receives updated snapshot.
+        ///   2. AudioSource.mute = true             belt-and-suspenders: silences local mic.
+        ///   3. SessionModel.MediaMode = DataOnly   truthful session state.
+        ///   4. RaiseSnapshotChanged()              UI receives updated snapshot.
         ///
         /// The remote peer still has an audio track but receives no audio data.
         /// DataChannel continues working normally.
@@ -581,16 +551,13 @@ namespace WebRtcV2.Application.Connection {
             RaiseSnapshotChanged();
         }
 
-        private void HandleRoomControlEvent(RoomControlEvent controlEvent) {
+        private void HandleBoothSocketEvent(BoothSocketEvent controlEvent) {
             if (controlEvent == null ||
                 string.IsNullOrWhiteSpace(_activeSessionId) ||
-                !string.Equals(controlEvent.sessionId, _activeSessionId, StringComparison.Ordinal))
+                !string.Equals(controlEvent.callId, _activeSessionId, StringComparison.Ordinal))
                 return;
 
-            if (!string.Equals(controlEvent.type, RoomControlEvent.Types.SignalAvailable, StringComparison.Ordinal))
-                return;
-
-            if (!string.Equals(controlEvent.signalType, SignalingEnvelope.Types.Hangup, StringComparison.Ordinal))
+            if (!string.Equals(controlEvent.type, BoothSocketEvent.Types.RemoteHangup, StringComparison.Ordinal))
                 return;
 
             HandleRemoteHangupSignalAsync().Forget();
@@ -601,13 +568,8 @@ namespace WebRtcV2.Application.Connection {
                 return;
 
             string sessionId = _activeSessionId;
-            var sessionToken = _sessionCts?.Token ?? CancellationToken.None;
 
             try {
-                var hangup = await _worker.GetSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, sessionToken);
-                if (hangup == null || _fsm.IsTerminal || !string.Equals(sessionId, _activeSessionId, StringComparison.Ordinal))
-                    return;
-
                 _diagnostics.LogSignaling("IN", SignalingEnvelope.Types.Hangup, "remote-socket");
                 await _worker.DeleteSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, CancellationToken.None)
                     .SuppressCancellationThrow();
@@ -626,8 +588,6 @@ namespace WebRtcV2.Application.Connection {
             _diagnostics.LogWarning("ConnectionFlow",
                 "MediaMode=DataOnly (pragmatic MVP: track disabled, not renegotiated)");
         }
-
-        // РІвЂќР‚РІвЂќР‚ Private: post-connect hangup polling РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         /// <summary>
         /// Lightweight background poll for remote hangup after the session is established.
@@ -667,8 +627,6 @@ namespace WebRtcV2.Application.Connection {
                 }
             }
         }
-
-        // РІвЂќР‚РІвЂќР‚ Private: data channel РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         private void SetupDataChannel(RTCDataChannel channel) {
             channel.OnOpen = () => {
@@ -711,8 +669,6 @@ namespace WebRtcV2.Application.Connection {
             if (_dataChannel?.ReadyState == RTCDataChannelState.Open)
                 _dataChannel.Send(Encoding.UTF8.GetBytes(DataChannelEnvelope.Pong().Serialize()));
         }
-
-        // РІвЂќР‚РІвЂќР‚ Private: signaling helpers РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         private async UniTaskVoid TryIceRestartAsCallerAsync() {
             if (_fsm.IsTerminal || _iceRestartInProgress || !_session.IsCreator ||
@@ -966,8 +922,6 @@ namespace WebRtcV2.Application.Connection {
             };
         }
 
-        // РІвЂќР‚РІвЂќР‚ Private: session lifecycle РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
-
         private void StartSessionCts(CancellationToken externalCt) {
             _sessionCts?.Cancel();
             _sessionCts?.Dispose();
@@ -978,7 +932,7 @@ namespace WebRtcV2.Application.Connection {
         private void CleanupSession() {
             _sessionCts?.Cancel();
 
-            // Stop sampler before disposing peer РІР‚вЂќ sampler uses _sessionCts token,
+            // Stop sampler before disposing peer  sampler uses _sessionCts token,
             // so cancellation signals it to exit the loop. Dispose then drops the reference.
             _statsSampler?.Dispose();
             _statsSampler = null;
@@ -995,7 +949,7 @@ namespace WebRtcV2.Application.Connection {
             _currentAttemptUsesRelay = false;
 
             // Best-effort cleanup of SDP slots. Hangup is intentionally excluded:
-            // - local hangup: the slot must remain readable for the remote peer (TTL=15s).
+            // - local hangup: the slot must remain readable for the remote peer (signaling TTL).
             // - remote hangup: the slot is already deleted in PollForRemoteHangupAsync.
             CleanupSignalingSlotsBestEffort(_activeSessionId,
                 SignalingEnvelope.Types.Offer,
@@ -1006,7 +960,7 @@ namespace WebRtcV2.Application.Connection {
         }
 
         public void Dispose() {
-            _roomControlSocket.OnEvent -= HandleRoomControlEvent;
+            _boothSocket.OnEvent -= HandleBoothSocketEvent;
             CleanupSession();
             _recovery.Dispose();
             _sessionCts?.Dispose();
