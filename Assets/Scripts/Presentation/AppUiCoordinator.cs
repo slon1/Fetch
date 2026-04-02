@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -434,7 +434,6 @@ namespace WebRtcV2.Presentation
                 return;
 
             _currentPendingCall = call;
-            _notificationService.NotifyIncomingCall(call.CallId, call.CallerNumber);
             RenderBoothSnapshot(_boothFlow.CurrentSnapshot, clearDialNumber: false);
         }
 
@@ -484,8 +483,6 @@ namespace WebRtcV2.Presentation
                 _previousLifecycleState != ConnectionLifecycleState.Connected)
             {
                 SyncBoothLineInCallAsync(_currentConnectionSnapshot.SessionId).Forget();
-                string peerNumber = ResolvePeerNumber(_currentBoothSnapshot);
-                _notificationService.NotifyConnected(_currentConnectionSnapshot.SessionId, peerNumber);
                 if (!_isChatVisible)
                     _videoScreen?.Show();
             }

@@ -11,6 +11,7 @@ Current design:
 - WebRTC lifecycle is handled by `ConnectionStateMachine`
 - media, route and signaling mode are handled by `ConnectionSession`
 - UI reads booth and connection snapshots instead of poking coordinators directly
+- FCM wakeup is not a state source; it only helps the app re-enter the booth flow
 
 This keeps the FSM small and avoids combinatorial state growth.
 
@@ -33,10 +34,12 @@ Typical booth transitions:
 - `RingingOutgoing -> Idle` on reject, offline, busy or timeout
 - `InCall -> Idle` on hangup or terminal cleanup
 
-Important rule:
+Important rules:
 
 - after any booth socket reconnect, the client must trust the server `line_snapshot`
   over stale local assumptions about ringing or connecting state
+- after FCM wakeup, the client must still reconnect booth socket and trust the next
+  `line_snapshot`; push payload itself is not authoritative state
 
 ## Connection Lifecycle States
 
@@ -139,13 +142,6 @@ It contains:
 - last error
 
 UI should render from snapshots instead of reaching into coordinators.
-
-## Compatibility Layer
-
-There is still a temporary compatibility mapping from `ConnectionSnapshot` back to
-the older `ConnectionState` enum for code that has not fully migrated.
-
-This compatibility layer should eventually be removed.
 
 ## User-Facing Semantics
 

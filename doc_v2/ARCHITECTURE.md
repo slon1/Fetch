@@ -9,7 +9,8 @@ The current product model is a telephone switchboard model:
 
 - every install owns one stable booth number
 - the user can see their own number and manually dial another one
-- booth availability is determined by a live Durable Object WebSocket
+- booth availability is determined by a live Durable Object WebSocket in foreground
+- Android background wakeup is handled through FCM push
 - call setup is manual: dial, ring, accept or reject
 - WebRTC transport logic stays adaptive and independent from booth UX
 
@@ -26,6 +27,7 @@ Current presentation layer:
 - `VideoScr`
 - `ChatScr`
 - `InfoScr`
+- `AppUiCoordinator` as the single active UI facade
 
 Responsibilities:
 
@@ -45,6 +47,7 @@ Responsibilities:
 - create the service graph
 - wire application services to views
 - own app lifetime
+- initialize FCM on Android
 - switch into fatal-error mode when startup/runtime reaches a managed terminal fault
 
 ### Crash Handling
@@ -92,7 +95,7 @@ Booth model invariants:
 - one booth number per install in v1
 - one active socket per booth in v1
 - booth ownership is persistent
-- booth online/offline is live-presence only and comes from the socket
+- booth online/offline is derived from live socket or stored FCM token reachability
 - booth reconnect must trust `line_snapshot` from the server as source of truth
 
 ### Connection
@@ -112,7 +115,7 @@ Responsibilities:
 - short disconnect-grace handling before terminal failure
 
 This coordinator remains the main WebRTC orchestrator and should stay readable.
-The booth migration should not push booth product-state concerns into ICE/media code.
+The booth model should not push booth product-state concerns into ICE/media code.
 
 ## Runtime State Model
 
@@ -179,6 +182,7 @@ Additional runtime fields:
 It owns:
 
 - booth registration
+- booth push-token registration
 - dial / accept / reject / hangup / connected commands
 - signaling slot API calls
 - polling behavior for missing signaling messages
@@ -209,7 +213,23 @@ Important limitation:
 
 - booth socket is reliable for foreground/live control
 - it is not a reliable background wakeup mechanism on mobile by itself
-- reliable background incoming-call wakeup is the next planned iteration through FCM
+- FCM complements it for Android wakeup, but does not replace it as the foreground control plane
+
+### FcmPushService
+
+`FcmPushService` owns Android Firebase Messaging integration.
+
+Responsibilities:
+
+- initialize Firebase Messaging
+- observe token lifecycle
+- publish token updates back to bootstrap
+- dispatch incoming-call push payloads to the app
+
+Important rule:
+
+- FCM is not the source of truth for line state
+- after wakeup, the app must reconnect booth socket and trust server `line_snapshot`
 
 ### WebRtcPeerAdapter
 
@@ -231,6 +251,7 @@ Current behavior:
 - microphone capture is reused across sessions
 - push-to-talk controls whether outgoing voice is enabled
 - camera/video path is active in the current booth baseline
+- app background visibility can influence whether local video remains enabled
 
 ## Server Domain Model
 
@@ -242,9 +263,10 @@ Responsibilities:
 
 - hold booth registration record
 - hold booth line state
+- hold the latest FCM token for that booth in v1
 - terminate superseded booth sockets
 - emit `line_snapshot` and booth control events
-- answer whether a booth is registered and online
+- answer whether a booth is registered and reachable
 
 Persistent booth record is intentionally minimal:
 
@@ -252,33 +274,47 @@ Persistent booth record is intentionally minimal:
 - `ownerClientId`
 - `createdAt`
 - `lastSeenAt`
+- `fcmToken`
+- `fcmPlatform`
+- `fcmUpdatedAt`
 
-Presence is not persistent; it is derived from the live socket.
+Presence is not persistent; it is derived from the live socket. FCM token storage is
+used only for wakeup delivery, not as authoritative line state.
 
 ### LobbyDurableObject
 
 The class name remains for migration convenience, but functionally it now acts as the
-switchboard coordinator.
+switchboard/orchestrator for booth dialing and call creation.
 
 Responsibilities:
 
-- validate dial attempts
-- orchestrate accept / reject / hangup / connected transitions
-- coordinate caller and callee booth line state
+- validate dial requests
+- decide `not_registered / offline / busy / ringing`
+- coordinate booth state transitions for both peers
+- trigger FCM send for Android background wakeup when a target booth has no socket but does have a valid token
 
 ### RoomDurableObject
 
-The class name remains for migration convenience, but functionally it now acts as the
-call record plus signaling-slot store.
+The class name remains for migration convenience, but functionally it is the per-call
+store.
 
 Responsibilities:
 
-- store `callId` state
-- store `offer`, `answer` and `hangup` slots
-- enforce retention / close cleanup
+- persist signaling slots per `callId`
+- store `offer`, `answer`, `hangup`, `restart` payloads
+- support best-effort cleanup after terminal call states
 
-## Current Known Limits
+## Android Runtime Notes
 
-- background incoming-call wakeup is not reliable yet because notifications are still triggered locally from booth socket events
-- direct vs relay labeling is good enough for diagnostics but not yet a billing-grade explanation of TURN usage
-- some historical class names remain from earlier migrations to avoid unnecessary churn in a working branch
+- `MessagingUnityPlayerActivity` is the launcher activity to support Firebase Messaging background behavior
+- the manifest declares `POST_NOTIFICATIONS`
+- notification channel `booth-calls` is the default FCM notification channel
+- local notification rendering is done through direct Android APIs, not the Unity mobile notifications package
+
+## Current Active Assets
+
+- scene: `Assets/Scenes/BT2.unity`
+- worker: `Assets/Scripts/Server/worker.js`
+- Android manifest: `Assets/Plugins/Android/AndroidManifest.xml`
+
+Legacy client scenes and old lobby/call presentation classes were removed from this branch.

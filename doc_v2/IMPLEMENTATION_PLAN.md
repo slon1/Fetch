@@ -4,27 +4,21 @@
 
 This file tracks the actual project path, not an aspirational rewrite.
 
-The codebase now has a working booth-first communication baseline in `BT2.unity`.
-The transport stack and TURN integration from earlier stages remain core assets and
-are carried forward into the current product model.
+The codebase now has a working booth-first communication baseline in `BT2.unity`
+with Android FCM wakeup integrated.
 
 Current branch posture:
 
 - booth-first manual dialing is the active product path
 - crash guard, WebRTC transport and TURN integration are working baseline assets
-- the old room-first client path was removed from this branch after the booth migration stabilized
+- old room-first and old legacy UI client paths were removed from this branch
 - future work should evolve the booth model, not revive waiting-room behavior
 
 ## Completed Stages
 
 ### Stage 0. Legacy Prototype
 
-Status: done
-
-Reference:
-
-- `Assets/Scripts/ManualSignaling.cs`
-- `Assets/Scenes/SampleScene.unity`
+Status: archived reference only
 
 What it provided:
 
@@ -73,18 +67,17 @@ Current limitation:
 
 ### Stage 4. Recovery Baseline
 
-Status: archived baseline, later simplified
+Status: simplified baseline
 
 Delivered earlier:
 
-- `RecoveryCoordinator`
 - disconnected grace period
-- retry budget and backoff
-- ICE restart recovery
+- retry budget and backoff experiments
+- ICE restart recovery experiments
 
 Current note:
 
-- the branch no longer relies on the full recovery path during normal product flow
+- the branch no longer relies on the old full recovery path during product flow
 - current behavior keeps only a short `ICE Disconnected` grace period before terminal failure
 
 ### Stage 5. Durable Objects Migration
@@ -95,7 +88,7 @@ Delivered:
 
 - Cloudflare Worker signaling migrated from KV to Durable Objects
 - signaling/session state moved into Durable Object storage
-- Worker-backed control flow became the new baseline
+- Worker-backed control flow became the baseline
 - signaling delays caused by KV visibility were removed from the happy path
 
 ### Stage 6. Crash Guard and Fatal Error Screen
@@ -110,6 +103,7 @@ Delivered:
 - global managed exception hooks
 - runtime fatal overlay independent from normal scene UI
 - local persistence of latest crash report for device-side diagnostics
+- expanded bootstrap and FCM console logging for Android troubleshooting
 
 Current limitation:
 
@@ -141,10 +135,11 @@ Goals achieved:
 - removed lobby, waiting-room and heartbeat from the product flow
 - gave every install one stable booth number
 - kept only minimal persistent ownership registry on the server
-- derived online/offline only from a live booth WebSocket
+- derived online/offline from booth socket presence plus FCM reachability
 - made call setup explicit and manual: dial, ring, accept, reject, hangup
 - kept signaling payloads on HTTP while moving control events to booth socket
-- preserved the existing adaptive WebRTC transport stack
+- preserved the adaptive WebRTC transport stack
+- reduced active client UI to `BT2.unity`
 
 Delivered in code and manually verified on the branch:
 
@@ -157,36 +152,48 @@ Delivered in code and manually verified on the branch:
 - booth line snapshot and remote hangup propagation
 - active `BT2.unity` screen-layer UI
 - line-state sync to `in_call`
-- local incoming-call notifications when app is not in focus but socket is alive
-- legacy room-flow client classes removed from the branch
-
-Current known caveats:
-
-- stale active-call cleanup after extreme simultaneous crash/offline cases still needs hardening
-- local notifications are best-effort only and are not a reliable background incoming-call solution
-- server-side Durable Object class names still reflect their migration origin
-
-## Deferred / Next Work
+- legacy room-flow and old legacy UI classes removed from the branch
 
 ### Stage 9. FCM Push Wakeup
 
-Status: next branch target
+Status: working baseline on Android
+
+Goals achieved:
+
+- added Android Firebase Messaging initialization and token lifecycle handling
+- sync booth push token to the worker
+- store one booth push token on the server in v1
+- send high-priority incoming-call wakeup through FCM HTTP v1
+- keep booth socket as foreground control plane
+- keep HTTP signaling slots and WebRTC transport unchanged
+- use FCM only as wakeup/notification transport, not as signaling transport
+
+Delivered:
+
+- `FcmPushService`
+- worker `POST /api/booths/{number}/push-token`
+- worker-side FCM OAuth/JWT sender using Cloudflare secrets
+- Android manifest updates for Firebase Messaging and notification channel
+- direct Android notification helper replacing `com.unity.mobile.notifications`
+- stale push protection through server `line_snapshot` resync after wakeup
+
+Current limitation:
+
+- first iteration is Android-only
+- one booth maps to one active FCM token in v1
+- if device has no Google Play services, FCM path will not work
+
+## Deferred / Next Work
+
+### Stage 10. Stale Line Hardening
+
+Status: next target
 
 Goals:
 
-- add reliable Android background incoming-call wakeup through FCM
-- keep booth socket as the foreground control plane
-- keep HTTP signaling slots and WebRTC transport unchanged where possible
-
-### Stage 10. Mobile Notification Polish
-
-Status: partially landed, not finalized
-
-Goals:
-
-- incoming-call notification polish
-- better wording and timing for connected/incoming notifications
-- platform-specific UX cleanup after booth flow is verified
+- harden `connecting` / `in_call` cleanup after crashes or long offline windows
+- reduce chance of stuck booth line state
+- make teardown more observable in logs
 
 ### Stage 11. Video Policy and UX
 
@@ -216,5 +223,5 @@ These are not part of v1.
 - keep booth presence socket-based; do not reintroduce heartbeat unless there is a proven product need
 - preserve the current transport resilience work instead of rebuilding signaling/media layers from scratch
 - after any booth socket reconnect, prefer server `line_snapshot` over stale local UI assumptions
-- use FCM only as wakeup/notification transport, not as a replacement for booth socket or signaling slots
-- if useful, limited Sonnet budget can be used via the user for scoped code writing, review or refactoring; do not assume direct connector access
+- keep FCM limited to wakeup/notification transport, not booth signaling
+- local Android notifications are now an implementation detail of the Android helper, not a separate product feature

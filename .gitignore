@@ -104,3 +104,21 @@ Assets/StreamingAssets/dev-secrets.template.json
 output
 *.zip
 *.toml
+# Firebase admin/service-account secrets
+*-firebase-adminsdk-*.json
+*adminsdk*.json
+# Firebase desktop binaries are too large for git hosting and are not needed for Android booth builds.
+/Assets/Firebase/Plugins/x86_64/
+/Assets/Firebase/Plugins/x86_64.meta
+# Unity performance test runtime artifacts
+/Assets/Resources/PerformanceTestRunInfo.json
+/Assets/Resources/PerformanceTestRunInfo.json.meta
+/Assets/Resources/PerformanceTestRunSettings.json
+/Assets/Resources/PerformanceTestRunSettings.json.meta
+# Firebase client config is kept local and must not be committed.
+/Assets/google-services.json
+/Assets/google-services.json.meta
+/Assets/StreamingAssets/google-services-desktop.json
+/Assets/StreamingAssets/google-services-desktop.json.meta
+/Assets/Plugins/Android/FirebaseApp.androidlib/res/values/google-services.xml
+

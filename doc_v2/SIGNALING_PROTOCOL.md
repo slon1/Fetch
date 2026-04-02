@@ -9,37 +9,40 @@ Characteristics:
 
 - Cloudflare Worker backend with Durable Objects
 - one booth number per install
-- one booth WebSocket per active client
+- one booth WebSocket per active foreground client
+- one booth FCM token per booth in v1
 - booth control events over WebSocket
+- Android background wakeup through FCM push
 - SDP and signaling slots over HTTP
 - non-trickle ICE
 
 This split is intentional. Low-latency line events use the booth socket, while
 retriable signaling payloads remain on HTTP.
 
-Important limitation:
+Important rule:
 
-- booth socket is reliable for foreground/live control
-- it is not a reliable background wakeup mechanism on mobile by itself
-- reliable background incoming-call wakeup is planned through FCM in the next branch
+- FCM complements booth socket for Android wakeup
+- FCM is not the source of truth for line state
+- after wakeup, the app must reconnect booth socket and trust the server `line_snapshot`
 
 ## High-Level Model
 
 There are two server-side domains:
 
-- booth domain: ownership, presence, line state and incoming/outgoing call control
+- booth domain: ownership, presence, line state, push token and incoming/outgoing call control
 - call domain: one durable call record plus signaling slots keyed by `callId`
 
 Current product flow:
 
 1. client registers or confirms booth ownership
-2. client opens `GET /api/booths/{number}/events` WebSocket
-3. caller sends `POST /api/dial`
-4. callee receives `incoming_call` via booth socket
-5. callee manually accepts or rejects
-6. caller becomes offerer and posts `offer`
-7. callee reads `offer`, posts `answer`, and WebRTC connects
-8. hangup and line reset are propagated through booth socket plus signaling cleanup
+2. Android client initializes Firebase Messaging and syncs push token when available
+3. client opens `GET /api/booths/{number}/events` WebSocket
+4. caller sends `POST /api/dial`
+5. callee receives `incoming_call` via booth socket if foreground, or FCM wakeup if background
+6. callee manually accepts or rejects
+7. caller becomes offerer and posts `offer`
+8. callee reads `offer`, posts `answer`, and WebRTC connects
+9. hangup and line reset are propagated through booth socket plus signaling cleanup
 
 ## Booth API
 
@@ -68,11 +71,26 @@ Successful response shape:
 }
 ```
 
+### Register Booth Push Token
+
+- `POST /api/booths/{number}/push-token`
+
+Body:
+
+```json
+{
+  "clientId": "stable-client-id",
+  "platform": "android",
+  "token": "fcm-registration-token"
+}
+```
+
 Semantics:
 
-- idempotent for the same `boothNumber + ownerClientId`
-- rejects booth ownership conflicts
-- stores minimal persistent ownership record only
+- validates booth ownership by `clientId`
+- stores or replaces the booth's current Android FCM token
+- idempotent for the same token
+- rejects invalid token body or ownership mismatch
 
 ### Booth Events WebSocket
 
@@ -93,28 +111,9 @@ Current event types:
 
 Current behavior:
 
-- the booth socket is the source of truth for line reachability
+- the booth socket is the source of truth for line reachability in foreground
 - after reconnect, the server sends a fresh `line_snapshot`
 - client UI should trust that snapshot over stale local assumptions
-
-### Booth Snapshot Shape
-
-Logical snapshot shape:
-
-```json
-{
-  "type": "line_snapshot",
-  "boothNumber": "3661",
-  "lineState": "idle",
-  "peerNumber": null,
-  "call": null,
-  "message": null,
-  "sentAt": 1774890000000
-}
-```
-
-When a call is pending or active, `call` contains the current `callId` plus caller
-and callee booth numbers.
 
 ## Call Control API
 
@@ -138,34 +137,15 @@ Possible response outcomes:
 - `offline`
 - `busy`
 
-Example success response:
-
-```json
-{
-  "ok": true,
-  "result": "ringing",
-  "callId": "call-id",
-  "callerNumber": "3661",
-  "calleeNumber": "4827"
-}
-```
-
 Notes:
 
 - caller does not start WebRTC yet; it waits for callee accept
-- if both users dial each other nearly simultaneously, the switchboard should avoid a user-facing failure and converge onto one pending call
+- if target booth has no active socket but does have a valid FCM token, the worker may still start the ringing flow and deliver wakeup through FCM
+- if FCM delivery is rejected as invalid and there is no live socket, the worker rolls the call back to `offline`
 
 ### Accept Call
 
 - `POST /api/calls/{callId}/accept`
-
-Body:
-
-```json
-{
-  "boothNumber": "4827"
-}
-```
 
 Semantics:
 
@@ -178,14 +158,6 @@ Semantics:
 
 - `POST /api/calls/{callId}/reject`
 
-Body:
-
-```json
-{
-  "boothNumber": "4827"
-}
-```
-
 Semantics:
 
 - terminates the pending call
@@ -195,14 +167,6 @@ Semantics:
 ### Hang Up
 
 - `POST /api/calls/{callId}/hangup`
-
-Body:
-
-```json
-{
-  "boothNumber": "3661"
-}
-```
 
 Semantics:
 
@@ -214,14 +178,6 @@ Semantics:
 ### Mark Connected
 
 - `POST /api/calls/{callId}/connected`
-
-Body:
-
-```json
-{
-  "boothNumber": "3661"
-}
-```
 
 Semantics:
 
@@ -250,3 +206,13 @@ Current behavior:
 - `DELETE /api/signal/{callId}?type={type}`
 
 Used for best-effort cleanup after the signal is consumed.
+
+## FCM Delivery Notes
+
+Worker FCM behavior in the current branch:
+
+- uses FCM HTTP v1
+- authenticates with service-account credentials stored in Cloudflare secrets
+- sends high-priority Android incoming-call wakeup
+- uses short `ttl` and collapse behavior to avoid stale or duplicated ringing notifications
+- keeps FCM limited to incoming-call wakeup, not ongoing booth/call control

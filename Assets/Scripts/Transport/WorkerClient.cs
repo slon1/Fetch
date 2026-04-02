@@ -58,6 +58,38 @@ namespace WebRtcV2.Transport
             }
         }
 
+        public async UniTask<bool> RegisterBoothPushTokenAsync(
+            string boothNumber,
+            string clientId,
+            string platform,
+            string token,
+            CancellationToken ct = default)
+        {
+            var body = JsonUtility.ToJson(new RegisterPushTokenRequest
+            {
+                clientId = clientId,
+                platform = platform,
+                token = token,
+            });
+            var (ok, responseBody) = await PostAsync($"{Base}/api/booths/{Uri.EscapeDataString(boothNumber)}/push-token", body, ct);
+            if (!ok)
+                return false;
+
+            if (string.IsNullOrWhiteSpace(responseBody))
+                return true;
+
+            try
+            {
+                var response = JsonUtility.FromJson<SimpleOkResponseDto>(responseBody);
+                return response != null && response.ok;
+            }
+            catch (Exception e)
+            {
+                WLog.Warn("WorkerClient", $"RegisterBoothPushToken parse error: {e.Message}");
+                return false;
+            }
+        }
+
         public async UniTask<DialResponseDto> DialAsync(
             string callerNumber,
             string callerClientId,
@@ -301,6 +333,13 @@ namespace WebRtcV2.Transport
         }
 
         [Serializable]
+        private class SimpleOkResponseDto
+        {
+            public bool ok;
+            public string error;
+        }
+
+        [Serializable]
         private class RegisterBoothRequest
         {
             public string boothNumber;
@@ -316,6 +355,14 @@ namespace WebRtcV2.Transport
         }
 
         [Serializable]
+        private class RegisterPushTokenRequest
+        {
+            public string clientId;
+            public string platform;
+            public string token;
+        }
+
+        [Serializable]
         private class CallActionRequest
         {
             public string boothNumber;
@@ -323,4 +370,3 @@ namespace WebRtcV2.Transport
         }
     }
 }
-

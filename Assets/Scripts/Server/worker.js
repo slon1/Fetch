@@ -9,6 +9,13 @@ const SWITCHBOARD_ID = "switchboard";
 const CALL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const BOOTH_NUMBER_LENGTH = 4;
 const RING_TIMEOUT_MS = 25 * 1000;
+const FCM_OAUTH_AUDIENCE = "https://oauth2.googleapis.com/token";
+const FCM_OAUTH_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+const FCM_CHANNEL_ID = "booth-calls";
+const FCM_CALL_TTL = "20s";
+
+let cachedFcmAccessToken = null;
+let cachedFcmAccessTokenExpiresAt = 0;
 
 const LINE_STATES = {
   IDLE: "idle",
@@ -46,6 +53,10 @@ export default {
       const boothEventsMatch = path.match(/^\/api\/booths\/([^/]+)\/events$/);
       if (boothEventsMatch && method === "GET")
         return handleBoothEvents(boothEventsMatch[1], request, env);
+
+      const boothPushTokenMatch = path.match(/^\/api\/booths\/([^/]+)\/push-token$/);
+      if (boothPushTokenMatch && method === "POST")
+        return withCors(await handleRegisterBoothPushToken(boothPushTokenMatch[1], request, env));
 
       if (path === "/api/dial" && method === "POST")
         return withCors(await handleDial(request, env));
@@ -101,6 +112,11 @@ export class BoothDurableObject {
 
     if (path === "/internal/reset" && method === "POST")
       return this.handleReset(request);
+
+    if (path === "/internal/push-token" && method === "POST")
+      return this.handlePushToken(request);
+    if (path === "/internal/clear-push-token" && method === "POST")
+      return this.handleClearPushToken(request);
 
     return respondJson({ error: "Not Found" }, 404);
   }
@@ -159,6 +175,10 @@ export class BoothDurableObject {
       callerClientId: line.callerClientId,
       createdAt: registration?.createdAt || null,
       lastSeenAt: registration?.lastSeenAt || null,
+      hasPushToken: !!registration?.fcmToken,
+      fcmPlatform: registration?.fcmPlatform || null,
+      fcmUpdatedAt: registration?.fcmUpdatedAt || null,
+      fcmToken: registration?.fcmToken || null,
     });
   }
 
@@ -227,6 +247,46 @@ export class BoothDurableObject {
     const boothNumber = registration?.boothNumber || normalizeNumber(body?.boothNumber);
     await this.state.storage.put("line", defaultLine());
     await this.broadcast(lineEvent(SOCKET_EVENT_TYPES.LINE_RESET, boothNumber, defaultLine(), normalizeString(body?.reason)));
+    return respondJson({ ok: true });
+  }
+
+  async handlePushToken(request) {
+    const body = await readJson(request);
+    const registration = await this.getRegistration();
+    if (!registration)
+      return respondJson({ ok: false, error: "booth_not_registered" }, 404);
+
+    const clientId = normalizeString(body?.clientId);
+    const platform = normalizeString(body?.platform);
+    const token = normalizeString(body?.token);
+    if (!clientId || !platform || !token)
+      return respondJson({ ok: false, error: "invalid_push_token" }, 400);
+    if (registration.ownerClientId !== clientId)
+      return respondJson({ ok: false, error: "ownership_mismatch" }, 403);
+    if (platform !== "android")
+      return respondJson({ ok: false, error: "unsupported_platform" }, 400);
+
+    registration.fcmToken = token;
+    registration.fcmPlatform = platform;
+    registration.fcmUpdatedAt = Date.now();
+    await this.state.storage.put("registration", registration);
+    return respondJson({ ok: true });
+  }
+
+  async handleClearPushToken(request) {
+    const body = await readJson(request);
+    const registration = await this.getRegistration();
+    if (!registration)
+      return respondJson({ ok: true });
+
+    const token = normalizeString(body?.token);
+    if (!token || registration.fcmToken !== token)
+      return respondJson({ ok: true });
+
+    delete registration.fcmToken;
+    delete registration.fcmPlatform;
+    delete registration.fcmUpdatedAt;
+    await this.state.storage.put("registration", registration);
     return respondJson({ ok: true });
   }
 
@@ -522,7 +582,9 @@ export class LobbyDurableObject {
     if (!targetStatus.registered)
       return respondJson({ ok: true, outcome: "not_registered" });
 
-    if (!targetStatus.online)
+    const targetHasPush = !!targetStatus.fcmToken && targetStatus.fcmPlatform === "android";
+    const targetReachable = targetStatus.online || targetHasPush;
+    if (!targetReachable)
       return respondJson({ ok: true, outcome: "offline" });
 
     if (callerStatus.lineState !== LINE_STATES.IDLE) {
@@ -571,6 +633,24 @@ export class LobbyDurableObject {
         eventType: SOCKET_EVENT_TYPES.INCOMING_CALL,
       })),
     ]);
+
+    if (targetHasPush) {
+      const pushResult = await sendIncomingCallPush(this.env, targetStatus.fcmToken, {
+        callId,
+        callerNumber,
+        calleeNumber: targetNumber,
+        boothNumber: targetNumber,
+      });
+
+      if (!pushResult.ok && pushResult.clearToken) {
+        await clearBoothPushToken(this.env, targetNumber, targetStatus.fcmToken);
+      }
+
+      if (!pushResult.ok && !targetStatus.online) {
+        await rollbackUndeliverableCall(this.env, callId, callerNumber, targetNumber, pushResult.reason || "push_send_failed");
+        return respondJson({ ok: true, outcome: "offline" });
+      }
+    }
 
     return respondJson({
       ok: true,
@@ -756,6 +836,14 @@ async function handleRegisterBooth(request, env) {
   return boothStub(env, boothNumber).fetch("https://booth/internal/register", jsonRequest(body));
 }
 
+async function handleRegisterBoothPushToken(boothNumber, request, env) {
+  const normalizedBoothNumber = normalizeNumber(boothNumber);
+  if (!normalizedBoothNumber)
+    return respondJson({ ok: false, error: "invalid_booth_number" }, 400);
+
+  return boothStub(env, normalizedBoothNumber).fetch("https://booth/internal/push-token", jsonRequest(await request.text()));
+}
+
 async function handleBoothEvents(boothNumber, request, env) {
   const internalUrl = new URL("https://booth/internal/events");
   internalUrl.search = new URL(request.url).search;
@@ -817,6 +905,176 @@ async function getCall(env, callId) {
   const response = await roomStub(env, callId).fetch("https://call/internal/call", { method: "GET" });
   if (!response.ok) return null;
   return await response.json();
+}
+
+async function clearBoothPushToken(env, boothNumber, token) {
+  if (!boothNumber || !token)
+    return;
+
+  await boothStub(env, boothNumber).fetch("https://booth/internal/clear-push-token", jsonRequest({ token }));
+}
+
+async function rollbackUndeliverableCall(env, callId, callerNumber, calleeNumber, reason) {
+  await Promise.allSettled([
+    roomStub(env, callId).fetch("https://call/internal/close", jsonRequest({ reason })),
+    boothStub(env, callerNumber).fetch("https://booth/internal/reset", jsonRequest({ boothNumber: callerNumber, reason })),
+    boothStub(env, calleeNumber).fetch("https://booth/internal/reset", jsonRequest({ boothNumber: calleeNumber, reason })),
+  ]);
+}
+
+async function sendIncomingCallPush(env, token, payload) {
+  if (!token)
+    return { ok: false, reason: "missing_token", clearToken: false };
+  if (!env.FCM_PROJECT_ID || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY)
+    return { ok: false, reason: "fcm_not_configured", clearToken: false };
+
+  try {
+    const accessToken = await getFcmAccessToken(env);
+    const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(env.FCM_PROJECT_ID)}/messages:send`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: {
+          token,
+          notification: {
+            title: "Incoming Call",
+            body: `Booth ${payload.callerNumber || "peer"} is calling you.`,
+          },
+          data: {
+            type: "incoming_call",
+            callId: `${payload.callId || ""}`,
+            callerNumber: `${payload.callerNumber || ""}`,
+            calleeNumber: `${payload.calleeNumber || ""}`,
+            boothNumber: `${payload.boothNumber || ""}`,
+            sentAt: `${Date.now()}`,
+          },
+          android: {
+            priority: "high",
+            ttl: FCM_CALL_TTL,
+            collapse_key: `incoming_call_${payload.boothNumber || "unknown"}`,
+            notification: {
+              channel_id: FCM_CHANNEL_ID,
+              default_sound: true,
+              tag: `incoming_call_${payload.boothNumber || "unknown"}`,
+            },
+          },
+        },
+      }),
+    });
+
+    if (response.ok)
+      return { ok: true, clearToken: false };
+
+    const bodyText = await response.text();
+    const parsedError = parseFcmError(bodyText);
+    console.error("FCM send failed", response.status, parsedError.errorCode || parsedError.status || bodyText);
+    return {
+      ok: false,
+      reason: parsedError.errorCode || parsedError.status || `http_${response.status}`,
+      clearToken: parsedError.errorCode === "UNREGISTERED",
+    };
+  } catch (error) {
+    console.error("FCM send exception", error);
+    return { ok: false, reason: "fcm_send_exception", clearToken: false };
+  }
+}
+
+async function getFcmAccessToken(env) {
+  const now = Date.now();
+  if (cachedFcmAccessToken && cachedFcmAccessTokenExpiresAt - 60_000 > now)
+    return cachedFcmAccessToken;
+
+  const jwt = await createServiceAccountJwt(env);
+  const response = await fetch(FCM_OAUTH_AUDIENCE, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(jwt)}`,
+  });
+
+  if (!response.ok)
+    throw new Error(`oauth_token_failed:${response.status}`);
+
+  const payload = await response.json();
+  cachedFcmAccessToken = payload.access_token;
+  cachedFcmAccessTokenExpiresAt = now + ((payload.expires_in || 3600) * 1000);
+  return cachedFcmAccessToken;
+}
+
+async function createServiceAccountJwt(env) {
+  const header = { alg: "RS256", typ: "JWT" };
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const claimSet = {
+    iss: env.FCM_CLIENT_EMAIL,
+    scope: FCM_OAUTH_SCOPE,
+    aud: FCM_OAUTH_AUDIENCE,
+    iat: nowSeconds,
+    exp: nowSeconds + 3600,
+  };
+
+  const encodedHeader = base64UrlEncodeJson(header);
+  const encodedClaimSet = base64UrlEncodeJson(claimSet);
+  const unsignedToken = `${encodedHeader}.${encodedClaimSet}`;
+  const signature = await signJwt(unsignedToken, env.FCM_PRIVATE_KEY);
+  return `${unsignedToken}.${signature}`;
+}
+
+async function signJwt(unsignedToken, privateKeyPem) {
+  const pem = privateKeyPem.replace(/\\n/g, "\n").trim();
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToArrayBuffer(pem),
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256",
+    },
+    false,
+    ["sign"]);
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(unsignedToken));
+  return base64UrlEncodeBytes(new Uint8Array(signature));
+}
+
+function pemToArrayBuffer(pem) {
+  const base64 = pem
+    .replace("-----BEGIN PRIVATE KEY-----", "")
+    .replace("-----END PRIVATE KEY-----", "")
+    .replace(/\s+/g, "");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++)
+    bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function base64UrlEncodeJson(value) {
+  return base64UrlEncodeBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function base64UrlEncodeBytes(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function parseFcmError(bodyText) {
+  try {
+    const payload = JSON.parse(bodyText || "{}");
+    const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
+    const fcmDetail = details.find((detail) => detail?.errorCode || detail?.["@type"] === "type.googleapis.com/google.firebase.fcm.v1.FcmError");
+    return {
+      status: payload?.error?.status || null,
+      errorCode: fcmDetail?.errorCode || null,
+    };
+  } catch {
+    return { status: null, errorCode: null };
+  }
 }
 
 function buildRingingResponse(status) {
@@ -924,3 +1182,4 @@ function withCors(response) {
     headers,
   });
 }
+
