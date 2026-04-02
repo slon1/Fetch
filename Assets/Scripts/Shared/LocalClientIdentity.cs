@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,7 +15,9 @@ namespace WebRtcV2.Shared
         private const string ClientIdPrefsKey = "WebRtcV2.ClientId";
         private const string BoothNumberPrefsKey = "WebRtcV2.BoothNumber";
         private const string BoothAttemptPrefsKey = "WebRtcV2.BoothAttempt";
-        private const ulong BoothModulo = 1_000_000_000_000UL;
+
+        public const int BoothNumberLength = 4;
+        private const ulong BoothModulo = 10_000UL;
 
         public string ClientId { get; }
         public string DisplayName { get; }
@@ -41,7 +43,7 @@ namespace WebRtcV2.Shared
             if (displayName.Length > maxDisplayNameLength)
                 displayName = displayName.Substring(0, maxDisplayNameLength);
 
-            string storedBoothNumber = PlayerPrefs.GetString(BoothNumberPrefsKey, string.Empty);
+            string storedBoothNumber = SanitizeStoredBoothNumber(PlayerPrefs.GetString(BoothNumberPrefsKey, string.Empty));
             int boothAttempt = Mathf.Max(0, PlayerPrefs.GetInt(BoothAttemptPrefsKey, 0));
             return new LocalClientIdentity(clientId, displayName, shortSuffix, storedBoothNumber, boothAttempt);
         }
@@ -51,17 +53,36 @@ namespace WebRtcV2.Shared
             using var sha = SHA256.Create();
             byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes($"{ClientId}:{attempt.ToString(CultureInfo.InvariantCulture)}"));
             ulong value = BitConverter.ToUInt64(hash, 0) % BoothModulo;
-            return value.ToString("D12", CultureInfo.InvariantCulture);
+            return value.ToString($"D{BoothNumberLength}", CultureInfo.InvariantCulture);
         }
 
         public void PersistBoothNumber(string boothNumber, int attempt)
         {
-            if (string.IsNullOrWhiteSpace(boothNumber))
+            string sanitizedBoothNumber = SanitizeStoredBoothNumber(boothNumber);
+            if (string.IsNullOrWhiteSpace(sanitizedBoothNumber))
                 return;
 
-            PlayerPrefs.SetString(BoothNumberPrefsKey, boothNumber.Trim());
+            PlayerPrefs.SetString(BoothNumberPrefsKey, sanitizedBoothNumber);
             PlayerPrefs.SetInt(BoothAttemptPrefsKey, Mathf.Max(0, attempt));
             PlayerPrefs.Save();
+        }
+
+        private static string SanitizeStoredBoothNumber(string boothNumber)
+        {
+            if (string.IsNullOrWhiteSpace(boothNumber))
+                return string.Empty;
+
+            string trimmed = boothNumber.Trim();
+            if (trimmed.Length != BoothNumberLength)
+                return string.Empty;
+
+            foreach (char c in trimmed)
+            {
+                if (!char.IsDigit(c))
+                    return string.Empty;
+            }
+
+            return trimmed;
         }
 
         private static string ResolveClientId()

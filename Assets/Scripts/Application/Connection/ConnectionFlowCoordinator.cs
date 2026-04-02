@@ -21,6 +21,8 @@ namespace WebRtcV2.Application.Connection {
     /// - Recovery remains ICE-first: disconnected grace period, retry budget and ICE restart.
     /// </summary>
     public class ConnectionFlowCoordinator : IConnectionFlow, IDisposable {
+        private const string RemoteHangupReason = "remote-hangup";
+
         private readonly WorkerClient _worker;
         private readonly AppConfig _config;
         private readonly ISecretsProvider _secrets;
@@ -39,13 +41,14 @@ namespace WebRtcV2.Application.Connection {
         private bool _hangupPollingStarted;
         private bool _relayFallbackQueued;
         private bool _currentAttemptUsesRelay;
+        private bool _sessionHasVideoTrack;
 
         private CancellationTokenSource _sessionCts;
 
         private WebRtcStatsSampler _statsSampler;
         private readonly ConnectionPolicy _policy;
-        private readonly RecoveryCoordinator _recovery;
         private bool _iceRestartInProgress;
+        private bool _disconnectGraceInProgress;
 
         public ConnectionSnapshot CurrentSnapshot => _session.ToSnapshot();
 
@@ -91,7 +94,6 @@ namespace WebRtcV2.Application.Connection {
             _boothSocket.OnEvent += HandleBoothSocketEvent;
 
             _policy = new ConnectionPolicy(config, diagnostics);
-            _recovery = new RecoveryCoordinator(config, diagnostics);
         }
 
         public async UniTask ConnectAsCallerAsync(string sessionId, CancellationToken ct = default) {
@@ -160,6 +162,12 @@ namespace WebRtcV2.Application.Connection {
                 CleanupSession();
             }
             catch (Exception e) {
+                if (IsRemoteHangupException(e)) {
+                    SetLifecycle(ConnectionLifecycleState.Closed, RemoteHangupReason);
+                    CleanupSession();
+                    return;
+                }
+
                 _session.SetLastError(e.Message);
                 _diagnostics.LogError("ConnectionFlow", e.Message);
                 QueueRelayFallbackIfNeeded(e.Message);
@@ -247,6 +255,12 @@ namespace WebRtcV2.Application.Connection {
                 CleanupSession();
             }
             catch (Exception e) {
+                if (IsRemoteHangupException(e)) {
+                    SetLifecycle(ConnectionLifecycleState.Closed, RemoteHangupReason);
+                    CleanupSession();
+                    return;
+                }
+
                 _session.SetLastError(e.Message);
                 _diagnostics.LogError("ConnectionFlow", e.Message);
                 QueueRelayFallbackIfNeeded(e.Message);
@@ -297,7 +311,7 @@ namespace WebRtcV2.Application.Connection {
 
         public void SetMicMuted(bool muted) => _mediaCapture.SetMicMuted(muted);
 
-        public void SetVideoEnabled(bool enabled) => _mediaCapture.SetVideoEnabled(enabled);
+        public void SetVideoEnabled(bool enabled) { _mediaCapture.SetVideoEnabled(enabled); UpdateMediaModeFromVideoState(); }
 
         /// <summary>
         /// Transitions the FSM and synchronises session.LifecycleState.
@@ -376,6 +390,9 @@ namespace WebRtcV2.Application.Connection {
 
             var videoTrack = await _mediaCapture.GetVideoTrackAsync(ct);
             _peer.AddTrack(videoTrack);
+
+            _sessionHasVideoTrack = videoTrack != null;
+            UpdateMediaModeFromVideoState();
         }
 
         private RTCConfiguration BuildRtcConfiguration(TurnCredentials turn) {
@@ -427,8 +444,8 @@ namespace WebRtcV2.Application.Connection {
             switch (state) {
                 case RTCIceConnectionState.Connected:
                 case RTCIceConnectionState.Completed:
-                    _recovery.CancelPending();
                     _iceRestartInProgress = false;
+                    _disconnectGraceInProgress = false;
                     if (_fsm.Current == ConnectionLifecycleState.Recovering || !_fsm.IsConnected) {
                         string reason = _fsm.Current == ConnectionLifecycleState.Recovering
                             ? "ice-recovered"
@@ -454,44 +471,38 @@ namespace WebRtcV2.Application.Connection {
         }
 
         private async UniTaskVoid HandleIceDisconnectedAsync() {
-            if (_fsm.IsTerminal || !_fsm.IsConnected || _iceRestartInProgress) return;
-
-            var sessionToken = _sessionCts?.Token ?? CancellationToken.None;
-            var outcome = await _recovery.BeginDisconnectedGracePeriodAsync(
-                () => _peer?.IceConnectionState ?? RTCIceConnectionState.Closed,
-                sessionToken);
-
-            if (_fsm.IsTerminal || outcome == RecoveryOutcome.Cancelled || outcome == RecoveryOutcome.Recovered)
+            await UniTask.SwitchToMainThread();
+            if (_fsm.IsTerminal || !_fsm.IsConnected || _disconnectGraceInProgress)
                 return;
 
-            if (outcome == RecoveryOutcome.DisconnectedTimeout) {
-                SetLifecycle(ConnectionLifecycleState.Recovering, "ice-disconnected-timeout");
-                HandleIceFailedAsync().Forget();
+            _disconnectGraceInProgress = true;
+            int graceMs = Math.Max(0, _config.connection.iceDisconnectedGraceMs);
+            _diagnostics.LogInfo("Recovery", $"ICE disconnected - grace period {graceMs}ms");
+
+            if (graceMs > 0) {
+                var sessionToken = _sessionCts?.Token ?? CancellationToken.None;
+                await UniTask.Delay(graceMs, cancellationToken: sessionToken).SuppressCancellationThrow();
+                if (sessionToken.IsCancellationRequested) {
+                    _disconnectGraceInProgress = false;
+                    return;
+                }
             }
+
+            _disconnectGraceInProgress = false;
+            if (_fsm.IsTerminal)
+                return;
+
+            var state = _peer?.IceConnectionState ?? RTCIceConnectionState.Closed;
+            if (state == RTCIceConnectionState.Connected || state == RTCIceConnectionState.Completed)
+                return;
+
+            FailSession("ice-disconnected");
         }
 
         private async UniTaskVoid HandleIceFailedAsync() {
-            if (_fsm.IsTerminal || _iceRestartInProgress) return;
-
-            if (_fsm.Current != ConnectionLifecycleState.Recovering)
-                SetLifecycle(ConnectionLifecycleState.Recovering, "ice-failed");
-
-            var sessionToken = _sessionCts?.Token ?? CancellationToken.None;
-            var outcome = await _recovery.BeginFailedRecoveryAsync(_session, sessionToken);
-            if (_fsm.IsTerminal || outcome == RecoveryOutcome.Cancelled || outcome == RecoveryOutcome.Recovered)
-                return;
-
-            switch (outcome) {
-                case RecoveryOutcome.RetryBudgetExceeded:
-                    FailSession("max-reconnect-reached");
-                    break;
-                case RecoveryOutcome.StartIceRestart:
-                    if (_session.IsCreator)
-                        TryIceRestartAsCallerAsync().Forget();
-                    else
-                        WaitForRemoteIceRestartOfferAsync().Forget();
-                    break;
-            }
+            await UniTask.SwitchToMainThread();
+            if (_fsm.IsTerminal) return;
+            FailSession("ice-failed");
         }
 
         private void HandleQualitySignal(QualityMonitor.Signal signal) {
@@ -728,6 +739,7 @@ namespace WebRtcV2.Application.Connection {
             }
 
             _iceRestartInProgress = false;
+            _disconnectGraceInProgress = false;
         }
 
         private async UniTaskVoid WaitForRemoteIceRestartOfferAsync() {
@@ -833,6 +845,9 @@ namespace WebRtcV2.Application.Connection {
                     _diagnostics.LogSignaling("POLL", type, $"hit elapsed={timer.ElapsedMilliseconds}ms attempts={attempts}");
                     return envelope;
                 }
+                if (!string.Equals(type, SignalingEnvelope.Types.Hangup, StringComparison.Ordinal))
+                    await ThrowIfRemoteHangupSignaledAsync(sessionId, ct);
+
 
                 await UniTask.Delay(TimeSpan.FromSeconds(interval), cancellationToken: ct)
                     .SuppressCancellationThrow();
@@ -844,6 +859,20 @@ namespace WebRtcV2.Application.Connection {
             _diagnostics.LogWarning("ConnectionFlow", $"Poll timeout for type={type} elapsed={timer.ElapsedMilliseconds}ms attempts={attempts}");
             return null;
         }
+        private async UniTask ThrowIfRemoteHangupSignaledAsync(string sessionId, CancellationToken ct) {
+            var hangup = await _worker.GetSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, ct);
+            if (hangup == null)
+                return;
+
+            _diagnostics.LogSignaling("IN", SignalingEnvelope.Types.Hangup, "remote-poll");
+            await _worker.DeleteSignalAsync(sessionId, SignalingEnvelope.Types.Hangup, ct)
+                .SuppressCancellationThrow();
+            throw new InvalidOperationException(RemoteHangupReason);
+        }
+
+        private static bool IsRemoteHangupException(Exception e) =>
+            string.Equals(e?.Message, RemoteHangupReason, StringComparison.Ordinal);
+
 
         private async UniTask WaitForConnectionAsync(CancellationToken ct) {
             bool connected = await _peer.WaitForIceConnectedAsync(
@@ -896,6 +925,21 @@ namespace WebRtcV2.Application.Connection {
             }
         }
 
+        private void UpdateMediaModeFromVideoState() {
+            if (_session.MediaMode == MediaMode.DataOnly)
+                return;
+
+            var mediaMode = _sessionHasVideoTrack && _mediaCapture.IsVideoEnabled
+                ? MediaMode.Full
+                : MediaMode.AudioOnly;
+
+            if (_session.MediaMode == mediaMode)
+                return;
+
+            _session.SetMediaMode(mediaMode);
+            RaiseSnapshotChanged();
+        }
+
         private void CleanupSignalingSlotsBestEffort(string sessionId, params string[] types) {
             if (string.IsNullOrEmpty(sessionId)) return;
             DeleteSignalingSlotsAsync(sessionId, types).Forget();
@@ -937,7 +981,6 @@ namespace WebRtcV2.Application.Connection {
             _statsSampler?.Dispose();
             _statsSampler = null;
             _policy.Reset();
-            _recovery.CancelPending();
             _iceRestartInProgress = false;
 
             _dataChannel?.Close();
@@ -947,6 +990,7 @@ namespace WebRtcV2.Application.Connection {
             _qualityMonitor.Reset();
             _hangupPollingStarted = false;
             _currentAttemptUsesRelay = false;
+            _sessionHasVideoTrack = false;
 
             // Best-effort cleanup of SDP slots. Hangup is intentionally excluded:
             // - local hangup: the slot must remain readable for the remote peer (signaling TTL).
@@ -962,7 +1006,6 @@ namespace WebRtcV2.Application.Connection {
         public void Dispose() {
             _boothSocket.OnEvent -= HandleBoothSocketEvent;
             CleanupSession();
-            _recovery.Dispose();
             _sessionCts?.Dispose();
             _sessionCts = null;
         }

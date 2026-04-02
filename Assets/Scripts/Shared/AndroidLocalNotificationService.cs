@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using UnityEngine;
 #if UNITY_ANDROID
 using Unity.Notifications.Android;
@@ -12,8 +12,8 @@ namespace WebRtcV2.Shared
         private readonly ConnectionDiagnostics _diagnostics;
 
 #if UNITY_ANDROID
-        private const string ChannelId = "room-events";
-        private const string ChannelName = "Room Events";
+        private const string ChannelId = "booth-calls";
+        private const string ChannelName = "Booth Calls";
         private PermissionRequest _permissionRequest;
 #endif
 
@@ -34,15 +34,15 @@ namespace WebRtcV2.Shared
         public void NotifyIncomingCall(string callId, string callerNumber)
         {
             Send(callId,
-                title: "Входящий звонок",
-                text: $"Номер {SafePeer(callerNumber)} звонит вам.");
+                title: "Incoming Call",
+                text: $"Booth {SafePeer(callerNumber)} is calling you.");
         }
 
         public void NotifyConnected(string callId, string peerDisplay)
         {
             Send(callId,
-                title: "Связь установлена",
-                text: $"{SafePeer(peerDisplay)}. Вас ждут у телефона.");
+                title: "Call Connected",
+                text: $"Connected with {SafePeer(peerDisplay)}.");
         }
 
         public void CancelSessionNotification(string sessionId)
@@ -61,7 +61,7 @@ namespace WebRtcV2.Shared
         }
 
         private static string SafePeer(string value) =>
-            string.IsNullOrWhiteSpace(value) ? "собеседник" : value.Trim();
+            string.IsNullOrWhiteSpace(value) ? "peer" : value.Trim();
 
         private void Send(string sessionId, string title, string text)
         {
@@ -107,7 +107,7 @@ namespace WebRtcV2.Shared
                 Id = ChannelId,
                 Name = ChannelName,
                 Importance = Importance.High,
-                Description = "Incoming call and connection events"
+                Description = "Incoming call and connection status notifications"
             };
             AndroidNotificationCenter.RegisterNotificationChannel(channel);
         }

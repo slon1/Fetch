@@ -17,6 +17,12 @@ Characteristics:
 This split is intentional. Low-latency line events use the booth socket, while
 retriable signaling payloads remain on HTTP.
 
+Important limitation:
+
+- booth socket is reliable for foreground/live control
+- it is not a reliable background wakeup mechanism on mobile by itself
+- reliable background incoming-call wakeup is planned through FCM in the next branch
+
 ## High-Level Model
 
 There are two server-side domains:
@@ -45,7 +51,7 @@ Body:
 
 ```json
 {
-  "boothNumber": "783999593661",
+  "boothNumber": "3661",
   "ownerClientId": "stable-client-id"
 }
 ```
@@ -55,7 +61,7 @@ Successful response shape:
 ```json
 {
   "ok": true,
-  "boothNumber": "783999593661",
+  "boothNumber": "3661",
   "ownerClientId": "stable-client-id",
   "createdAt": 1774890000000,
   "lastSeenAt": 1774890000000
@@ -98,7 +104,7 @@ Logical snapshot shape:
 ```json
 {
   "type": "line_snapshot",
-  "boothNumber": "783999593661",
+  "boothNumber": "3661",
   "lineState": "idle",
   "peerNumber": null,
   "call": null,
@@ -120,8 +126,8 @@ Body:
 
 ```json
 {
-  "callerNumber": "783999593661",
-  "targetNumber": "123456789012"
+  "callerNumber": "3661",
+  "targetNumber": "4827"
 }
 ```
 
@@ -139,8 +145,8 @@ Example success response:
   "ok": true,
   "result": "ringing",
   "callId": "call-id",
-  "callerNumber": "783999593661",
-  "calleeNumber": "123456789012"
+  "callerNumber": "3661",
+  "calleeNumber": "4827"
 }
 ```
 
@@ -157,7 +163,7 @@ Body:
 
 ```json
 {
-  "boothNumber": "123456789012"
+  "boothNumber": "4827"
 }
 ```
 
@@ -176,7 +182,7 @@ Body:
 
 ```json
 {
-  "boothNumber": "123456789012"
+  "boothNumber": "4827"
 }
 ```
 
@@ -194,7 +200,7 @@ Body:
 
 ```json
 {
-  "boothNumber": "783999593661"
+  "boothNumber": "3661"
 }
 ```
 
@@ -213,7 +219,7 @@ Body:
 
 ```json
 {
-  "boothNumber": "783999593661"
+  "boothNumber": "3661"
 }
 ```
 
@@ -238,111 +244,9 @@ Current behavior:
 
 - returns envelope JSON if slot exists
 - returns `404` if slot is empty
-- client treats missing slot as a normal polling condition
 
 ### Delete Signal
 
 - `DELETE /api/signal/{callId}?type={type}`
 
-Used as best-effort cleanup for consumed signaling slots.
-
-## Current Signal Types
-
-- `offer`
-- `answer`
-- `hangup`
-
-Current implementation also reuses the same `offer` and `answer` slot types for
-ICE restart instead of introducing restart-specific message types.
-
-## Envelope Shape
-
-Current envelope fields:
-
-```json
-{
-  "sessionId": "call-id",
-  "fromPeerId": "peer-id",
-  "toPeerId": "optional-peer-id",
-  "messageId": "unique-id",
-  "type": "offer",
-  "ttlMs": 60000,
-  "payloadJson": "{...}",
-  "sentAt": 1774890000000
-}
-```
-
-Notes:
-
-- the envelope still uses the historical field name `sessionId`
-- in the booth architecture this value now corresponds to `callId`
-
-## SDP Payload
-
-For `offer` and `answer`, `payloadJson` currently contains SDP-only payload.
-
-Example logical shape:
-
-```json
-{
-  "sdp": "v=0..."
-}
-```
-
-Because the stack is non-trickle, local SDP is posted only after ICE gathering
-finishes.
-
-## Polling Rules
-
-Polling still exists, but only for signaling slots.
-
-Client behavior:
-
-- poll for `offer`, `answer`, or `hangup` by `callId`
-- tolerate `404` as "not yet available"
-- stop polling on timeout or cancellation
-
-This is especially important for:
-
-- caller waiting for `answer`
-- callee waiting for initial `offer`
-- either side watching for `hangup` during fallback cases
-
-## ICE Restart Semantics
-
-Current recovery flow:
-
-- caller-side recovery produces a new offer with `RTCOfferAnswerOptions.iceRestart = true`
-- offer is posted into the normal `offer` slot for the same `callId`
-- callee reads it, applies it, produces answer, and posts to normal `answer` slot
-- both sides wait for ICE to return to `Connected` or `Completed`
-
-Current simplifications:
-
-- caller initiates restart
-- no glare handling
-- no peer recreation by default
-- no separate restart-specific message types
-
-## Presence Semantics
-
-Current product semantics:
-
-- `not_registered`: no booth ownership record exists
-- `offline`: booth exists but no live booth socket is connected
-- `busy`: booth exists and line state is not `idle`
-- `ringing`: dial accepted by the switchboard and the target booth is being alerted
-
-There is no heartbeat in the booth architecture. Presence is derived only from the
-live booth socket.
-
-## Future Extensions
-
-Possible later protocol additions:
-
-- contacts or favorites
-- alias or display label for booth numbers
-- voicemail or short text fallback
-- explicit restart-specific signaling message types if debugging value outweighs added complexity
-
-These are not required for the current working baseline.
+Used for best-effort cleanup after the signal is consumed.

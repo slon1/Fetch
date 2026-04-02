@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Serialization;
@@ -196,7 +196,7 @@ namespace WebRtcV2.Presentation
 
         private static string BuildIdleStatus(string boothNumber, string message)
         {
-            string baseText = $"Your number: {SafeNumber(boothNumber)}\nEnter a 12-digit number to call";
+            string baseText = $"Your number: {SafeNumber(boothNumber)}\nEnter a booth number to call";
             return string.IsNullOrWhiteSpace(message)
                 ? baseText
                 : baseText + "\n" + message.Trim();

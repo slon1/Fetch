@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using Unity.WebRTC;
 using UnityEngine;
@@ -22,10 +22,11 @@ namespace WebRtcV2.Bootstrap
         [Tooltip("AudioSource on which remote audio will be played.")]
         [SerializeField] private AudioSource remoteAudioSource;
 
-        [Header("Views")]
-        [SerializeField] private LobbyScreenView lobbyView;
-        [SerializeField] private CallScreenView callView;
-        [SerializeField] private ConnectionStatusView statusView;
+        [Header("Screens")]
+        [SerializeField] private CallerScr callerScreen;
+        [SerializeField] private VideoScr videoScreen;
+        [SerializeField] private ChatScr chatScreen;
+        [SerializeField] private InfoScr infoScreen;
 
         private WorkerClient _workerClient;
         private ISecretsProvider _secretsProvider;
@@ -63,9 +64,10 @@ namespace WebRtcV2.Bootstrap
                 StartupCheckResult preflight = StartupPreflightValidator.Validate(
                     config,
                     remoteAudioSource,
-                    lobbyView,
-                    callView,
-                    statusView);
+                    callerScreen,
+                    videoScreen,
+                    chatScreen,
+                    infoScreen);
                 if (!preflight.Success)
                 {
                     EnterFatalState(_crashCoordinator.CreatePreflightFailureReport(preflight));
@@ -113,11 +115,13 @@ namespace WebRtcV2.Bootstrap
         private void OnApplicationFocus(bool hasFocus)
         {
             _visibilityTracker?.SetFocused(hasFocus);
+            _uiCoordinator?.SetAppVisibility();
         }
 
         private void OnApplicationPause(bool pauseStatus)
         {
             _visibilityTracker?.SetPaused(pauseStatus);
+            _uiCoordinator?.SetAppVisibility();
         }
 
         private void BuildServices()
@@ -153,14 +157,16 @@ namespace WebRtcV2.Bootstrap
         private void BuildUiCoordinator()
         {
             _uiCoordinator = new AppUiCoordinator(
-                lobbyView,
-                callView,
-                statusView,
+                callerScreen,
+                videoScreen,
+                chatScreen,
+                infoScreen,
                 remoteAudioSource,
                 _mediaCapture,
                 _boothFlow,
                 _connectionFlow,
                 _notificationService,
+                _visibilityTracker,
                 _appCts.Token);
         }
 

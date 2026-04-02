@@ -7,7 +7,7 @@ const CORS = {
 const SIGNAL_TYPES = new Set(["offer", "answer", "hangup"]);
 const SWITCHBOARD_ID = "switchboard";
 const CALL_RETENTION_MS = 24 * 60 * 60 * 1000;
-const BOOTH_NUMBER_LENGTH = 12;
+const BOOTH_NUMBER_LENGTH = 4;
 const RING_TIMEOUT_MS = 25 * 1000;
 
 const LINE_STATES = {
@@ -714,6 +714,17 @@ export class LobbyDurableObject {
     }
 
     await roomStub(this.env, callId).fetch("https://call/internal/close", jsonRequest({ reason }));
+    if (remoteEventType === SOCKET_EVENT_TYPES.REMOTE_HANGUP) {
+      await roomStub(this.env, callId).fetch("https://call/internal/signal", jsonRequest({
+        sessionId: callId,
+        fromPeerId: clientId,
+        type: "hangup",
+        ttlMs: 60_000,
+        sentAt: Date.now(),
+        payloadJson: "{}",
+      }));
+    }
+
 
     const remoteNumber = boothNumber === call.callerNumber ? call.calleeNumber : call.callerNumber;
     await Promise.allSettled([

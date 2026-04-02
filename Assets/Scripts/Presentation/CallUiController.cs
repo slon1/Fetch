@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using Unity.WebRTC;
 using UnityEngine;
@@ -80,7 +80,7 @@ namespace WebRtcV2.Presentation
         public void ApplySnapshot(ConnectionSnapshot snapshot)
         {
             _statusView.SetSnapshot(snapshot);
-            _callView.SetMuteAvailable(snapshot.MediaMode == MediaMode.AudioOnly);
+            _callView.SetMuteAvailable(snapshot.MediaMode != MediaMode.DataOnly);
         }
 
         public void ClearTransientMedia()

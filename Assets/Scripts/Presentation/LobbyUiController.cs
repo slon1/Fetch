@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using WebRtcV2.Application.Booth;
@@ -101,7 +101,7 @@ namespace WebRtcV2.Presentation
                 string normalizedNumber = NormalizeDialNumber(targetNumber);
                 if (normalizedNumber == null)
                 {
-                    _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Enter a 12-digit number");
+                    _lobbyView.ShowIdle(_boothFlow.BoothNumber, "Enter a valid booth number");
                     return;
                 }
 
@@ -265,7 +265,7 @@ namespace WebRtcV2.Presentation
             if (string.IsNullOrWhiteSpace(raw))
                 return null;
 
-            char[] buffer = new char[12];
+            char[] buffer = new char[LocalClientIdentity.BoothNumberLength];
             int count = 0;
             foreach (char c in raw)
             {
@@ -276,7 +276,7 @@ namespace WebRtcV2.Presentation
                 buffer[count++] = c;
             }
 
-            return count == 12 ? new string(buffer, 0, count) : null;
+            return count == LocalClientIdentity.BoothNumberLength ? new string(buffer, 0, count) : null;
         }
 
         private void RenderSnapshot(BoothSnapshot snapshot, string message)

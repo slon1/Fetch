@@ -22,9 +22,10 @@ transport code directly.
 
 Current presentation layer:
 
-- `LobbyScreenView` acting as the booth dial screen shell
-- `CallScreenView`
-- `ConnectionStatusView`
+- `CallerScr`
+- `VideoScr`
+- `ChatScr`
+- `InfoScr`
 
 Responsibilities:
 
@@ -35,7 +36,7 @@ Responsibilities:
 
 ### Bootstrap
 
-`AppBootstrap` is the composition root for `game.unity`.
+`AppBootstrap` is the composition root for `BT2.unity`.
 
 Responsibilities:
 
@@ -108,7 +109,7 @@ Responsibilities:
 - state publication
 - quality sampling lifecycle
 - degradation execution
-- recovery execution
+- short disconnect-grace handling before terminal failure
 
 This coordinator remains the main WebRTC orchestrator and should stay readable.
 The booth migration should not push booth product-state concerns into ICE/media code.
@@ -137,7 +138,6 @@ The runtime model separates booth state from media/session state.
 - `Signaling`
 - `Connecting`
 - `Connected`
-- `Recovering`
 - `Failed`
 - `Closed`
 
@@ -152,7 +152,7 @@ Session dimensions:
 - `MediaMode`
   - `AudioOnly`
   - `DataOnly`
-  - `Full` reserved for future video
+  - `Full`
 - `RouteMode`
   - `Direct`
   - `Relay`
@@ -205,6 +205,12 @@ Socket events currently cover:
 - `remote_hangup`
 - `line_reset`
 
+Important limitation:
+
+- booth socket is reliable for foreground/live control
+- it is not a reliable background wakeup mechanism on mobile by itself
+- reliable background incoming-call wakeup is the next planned iteration through FCM
+
 ### WebRtcPeerAdapter
 
 `WebRtcPeerAdapter` wraps `RTCPeerConnection`.
@@ -213,7 +219,6 @@ Responsibilities:
 
 - initialize peer connection
 - create offer/answer
-- create ICE-restart offer
 - wait for ICE gathering
 - expose events for track, data channel and ICE state
 
@@ -225,7 +230,7 @@ Current behavior:
 
 - microphone capture is reused across sessions
 - push-to-talk controls whether outgoing voice is enabled
-- camera/video path exists, but the product baseline is still audio + data first
+- camera/video path is active in the current booth baseline
 
 ## Server Domain Model
 
@@ -258,74 +263,22 @@ switchboard coordinator.
 Responsibilities:
 
 - validate dial attempts
-- resolve `not_registered`, `offline`, `busy` and `ringing`
-- create call bindings
-- coordinate accept / reject / connected / hangup transitions
-- reset both booths on terminal call actions
+- orchestrate accept / reject / hangup / connected transitions
+- coordinate caller and callee booth line state
 
 ### RoomDurableObject
 
 The class name remains for migration convenience, but functionally it now acts as the
-call-session store.
+call record plus signaling-slot store.
 
 Responsibilities:
 
-- store one call record per `callId`
-- hold signaling slots (`offer`, `answer`, `hangup`)
-- enforce ring timeout and terminal cleanup retention
-- provide durable storage independent of booth socket reconnects
+- store `callId` state
+- store `offer`, `answer` and `hangup` slots
+- enforce retention / close cleanup
 
-## Control Plane Split
+## Current Known Limits
 
-The runtime control plane is intentionally hybrid.
-
-Through booth socket events:
-
-- incoming call wakeup
-- outgoing ringing
-- call accepted
-- call rejected
-- remote hangup
-- line reset
-- line snapshot after reconnect
-
-Through HTTP endpoints:
-
-- booth registration
-- dial / accept / reject / hangup / connected commands
-- `offer`
-- `answer`
-- `hangup`
-- ICE restart signaling reuse through the same slot mechanism
-
-Through `RTCDataChannel`:
-
-- chat
-- lightweight live UX commands such as peer-speaking state
-
-This split keeps low-latency booth control on WebSocket while keeping SDP and
-other retriable payloads on HTTP.
-
-## Call Role Rules
-
-- caller is always offerer
-- callee is always answerer
-- booth/socket reconnect does not redefine call roles
-- if both users dial each other nearly simultaneously, the switchboard should avoid a user-facing failure and converge onto one pending call
-
-## ICE Server Strategy
-
-Current ICE configuration is built from two sources:
-
-- STUN URLs from `AppConfig`
-- TURN URLs and credentials from `StreamingAssets/dev-secrets.json`
-
-Transport assumptions:
-
-- direct path first
-- relay fallback on the next attempt after selected failure paths
-- multiple STUN/TURN endpoints supported
-- relay path can carry a stricter media policy later, including video disable
-
-The booth migration must not simplify away transport resilience.
-That transport stack is one of the main assets of the project.
+- background incoming-call wakeup is not reliable yet because notifications are still triggered locally from booth socket events
+- direct vs relay labeling is good enough for diagnostics but not yet a billing-grade explanation of TURN usage
+- some historical class names remain from earlier migrations to avoid unnecessary churn in a working branch

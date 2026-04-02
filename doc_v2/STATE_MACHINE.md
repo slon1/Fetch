@@ -47,7 +47,6 @@ Important rule:
 - `Signaling`
 - `Connecting`
 - `Connected`
-- `Recovering`
 - `Failed`
 - `Closed`
 
@@ -60,12 +59,6 @@ Typical connect path:
 - `Signaling -> Connecting`
 - `Connecting -> Connected`
 
-Recovery path:
-
-- `Connected -> Recovering`
-- `Recovering -> Connected`
-- `Recovering -> Failed`
-
 Terminal paths:
 
 - `Preparing -> Failed`
@@ -73,8 +66,6 @@ Terminal paths:
 - `Connecting -> Failed`
 - `Connected -> Closed`
 - `Connected -> Failed`
-- `Recovering -> Closed`
-- `Recovering -> Failed`
 
 Cancellation path:
 
@@ -86,13 +77,13 @@ Cancellation path:
 
 - `AudioOnly`
 - `DataOnly`
-- `Full` reserved
+- `Full`
 
 Current meaning:
 
 - `AudioOnly`: normal voice-call baseline
 - `DataOnly`: degraded mode after quality-policy decision
-- `Full`: reserved for a future richer video path
+- `Full`: current audio+video session mode
 
 ### RouteMode
 
@@ -165,18 +156,17 @@ Current intended mapping:
 - booth `RingingOutgoing` -> waiting for remote answer
 - booth `Connecting` + connection `Preparing/Signaling/Connecting` -> call setup in progress
 - booth `InCall` + connection `Connected` -> active call
-- connection `Recovering` -> trying to restore media/session
 - connection `Failed` -> session lost
 - connection `Closed` -> session ended intentionally or by remote hangup
 
-## Recovery Semantics
+## Disconnect Handling
 
-Recovery is intentionally separate from booth line state.
+Current baseline behavior is intentionally simple:
 
 - poor quality alone does not mean the lifecycle leaves `Connected`
-- `Disconnected` may start grace handling and then move to `Recovering`
-- successful ICE restart returns to `Connected`
-- failed recovery budget ends in `Failed`
+- `Disconnected` starts a short grace period
+- if ICE comes back during that grace period, the session stays alive
+- if not, the call transitions to `Failed`
 - booth line state should return to `Idle` only when booth control flow confirms terminal teardown
 
 ## Why This Model Was Chosen

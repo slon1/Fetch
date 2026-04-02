@@ -4,14 +4,14 @@
 
 This file tracks the actual project path, not an aspirational rewrite.
 
-The codebase now has a working booth-first communication baseline in `game.unity`.
-The transport stack, recovery logic and TURN integration from earlier stages remain
-core assets and are carried forward into the new product model.
+The codebase now has a working booth-first communication baseline in `BT2.unity`.
+The transport stack and TURN integration from earlier stages remain core assets and
+are carried forward into the current product model.
 
 Current branch posture:
 
 - booth-first manual dialing is the active product path
-- crash guard, WebRTC transport, recovery and TURN integration are working baseline assets
+- crash guard, WebRTC transport and TURN integration are working baseline assets
 - the old room-first client path was removed from this branch after the booth migration stabilized
 - future work should evolve the booth model, not revive waiting-room behavior
 
@@ -38,7 +38,7 @@ Status: done
 
 Delivered:
 
-- `game.unity` as new application scene
+- application bootstrap scene
 - `AppBootstrap`
 - view-based UI composition
 - audio call
@@ -65,7 +65,7 @@ Delivered:
 - `WebRtcStatsSampler`
 - `QualitySnapshot`
 - `ConnectionPolicy`
-- first downgrade path: `AudioOnly -> DataOnly`
+- downgrade path `AudioOnly -> DataOnly`
 
 Current limitation:
 
@@ -73,19 +73,19 @@ Current limitation:
 
 ### Stage 4. Recovery Baseline
 
-Status: done
+Status: archived baseline, later simplified
 
-Delivered:
+Delivered earlier:
 
 - `RecoveryCoordinator`
 - disconnected grace period
 - retry budget and backoff
 - ICE restart recovery
 
-Current tested result:
+Current note:
 
-- short network loss can recover within the same session
-- longer outages end in `Failed` and return to idle UI
+- the branch no longer relies on the full recovery path during normal product flow
+- current behavior keeps only a short `ICE Disconnected` grace period before terminal failure
 
 ### Stage 5. Durable Objects Migration
 
@@ -150,12 +150,12 @@ Delivered in code and manually verified on the branch:
 
 - `BoothFlowCoordinator`
 - `BoothSocketService`
-- stable 12-digit booth-number assignment from local identity
+- stable 4-digit booth-number assignment from local identity in the current test build
 - Worker booth registration endpoint
 - Worker booth event WebSocket endpoint
 - dial / accept / reject / hangup / connected endpoints
 - booth line snapshot and remote hangup propagation
-- booth UI reusing the former lobby screen shell
+- active `BT2.unity` screen-layer UI
 - line-state sync to `in_call`
 - local incoming-call notifications when app is not in focus but socket is alive
 - legacy room-flow client classes removed from the branch
@@ -163,12 +163,22 @@ Delivered in code and manually verified on the branch:
 Current known caveats:
 
 - stale active-call cleanup after extreme simultaneous crash/offline cases still needs hardening
-- booth UI names in some scene/prefab assets still reflect their old lobby origin
+- local notifications are best-effort only and are not a reliable background incoming-call solution
 - server-side Durable Object class names still reflect their migration origin
 
-## Deferred Work
+## Deferred / Next Work
 
-### Stage 9. Mobile Notification Polish
+### Stage 9. FCM Push Wakeup
+
+Status: next branch target
+
+Goals:
+
+- add reliable Android background incoming-call wakeup through FCM
+- keep booth socket as the foreground control plane
+- keep HTTP signaling slots and WebRTC transport unchanged where possible
+
+### Stage 10. Mobile Notification Polish
 
 Status: partially landed, not finalized
 
@@ -178,7 +188,7 @@ Goals:
 - better wording and timing for connected/incoming notifications
 - platform-specific UX cleanup after booth flow is verified
 
-### Stage 10. Video Policy and UX
+### Stage 11. Video Policy and UX
 
 Status: deferred
 
@@ -187,7 +197,7 @@ Reason:
 - video multiplies complexity in quality management, degradation and UX
 - the audio/data baseline should remain stable before adding more aggressive video logic
 
-### Stage 11. Booth UX Extensions
+### Stage 12. Booth UX Extensions
 
 Status: deferred
 
@@ -206,4 +216,5 @@ These are not part of v1.
 - keep booth presence socket-based; do not reintroduce heartbeat unless there is a proven product need
 - preserve the current transport resilience work instead of rebuilding signaling/media layers from scratch
 - after any booth socket reconnect, prefer server `line_snapshot` over stale local UI assumptions
+- use FCM only as wakeup/notification transport, not as a replacement for booth socket or signaling slots
 - if useful, limited Sonnet budget can be used via the user for scoped code writing, review or refactoring; do not assume direct connector access

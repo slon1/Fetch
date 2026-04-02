@@ -9,9 +9,10 @@ namespace WebRtcV2.CrashHandling
         public static StartupCheckResult Validate(
             AppConfig config,
             AudioSource remoteAudioSource,
-            LobbyScreenView lobbyView,
-            CallScreenView callView,
-            ConnectionStatusView statusView)
+            CallerScr callerScreen,
+            VideoScr videoScreen,
+            ChatScr chatScreen,
+            InfoScr infoScreen)
         {
             if (config == null)
                 return StartupCheckResult.Fail(
@@ -25,11 +26,11 @@ namespace WebRtcV2.CrashHandling
                     "Remote audio output is not configured.",
                     "Assign AudioSource on AppBootstrap.");
 
-            if (lobbyView == null || callView == null || statusView == null)
+            if (callerScreen == null || videoScreen == null || chatScreen == null || infoScreen == null)
                 return StartupCheckResult.Fail(
                     "BOOT-SCENE-REF",
                     "Scene UI references are incomplete.",
-                    "Check LobbyScreenView, CallScreenView and ConnectionStatusView on AppBootstrap.");
+                    "Check CallerScr, VideoScr, ChatScr and InfoScr on AppBootstrap.");
 
             if (!IsSupportedPlatform(UnityEngine.Application.platform))
                 return StartupCheckResult.Fail(

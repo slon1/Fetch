@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using Unity.WebRTC;
@@ -38,6 +38,8 @@ namespace WebRtcV2.Transport
         private bool _videoEnabled = true;
 
         public event Action<Texture> OnLocalVideoPreviewChanged;
+
+        public bool IsVideoEnabled => _videoEnabled;
 
         public MediaCaptureService(Transform parent, ConnectionDiagnostics diagnostics)
         {
@@ -279,7 +281,7 @@ namespace WebRtcV2.Transport
             {
                 await UniTask.Yield(PlayerLoopTiming.LastPostLateUpdate, ct);
 
-                if (!_webCamTexture.didUpdateThisFrame)
+                if (!_videoEnabled || !_webCamTexture.didUpdateThisFrame)
                     continue;
 
                 if (RefreshSourceTransform())
